@@ -4,8 +4,9 @@ import math
 from datetime import datetime
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
-TG_TOKEN       = "8679308241:AAHQerWUNlCzvAEhvNZtIHu6gfkzXwl7R2Y"
-TG_CHAT_ID     = "6653312721"
+import os
+TG_TOKEN   = os.environ.get("TG_TOKEN")
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 ODDS_API_KEY   = "YOUR_ODDS_API_KEY_HERE"  # get free key at the-odds-api.com
 EDGE_THRESHOLD = 0.06  # 6% minimum edge
 POLL_INTERVAL  = 30    # seconds between scans
