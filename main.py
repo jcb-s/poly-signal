@@ -303,17 +303,22 @@ def fetch_polymarkets_crypto():
             params={"active": "true", "limit": 100,
                     "order": "volume", "ascending": "false"}, timeout=10)
         if not r.ok:
+            print(f"  Polymarket fetch failed: {r.status_code}")
             return []
         data = r.json()
         markets = data.get("markets", data) if isinstance(data, dict) else data
+        print(f"  Raw markets returned: {len(markets)}")
+        print(f"  Sample questions: {[m.get('question','') for m in markets[:5]]}")
         assets = ["btc", "bitcoin", "eth", "ethereum", "sol", "solana",
                   "xrp", "ripple", "doge", "dogecoin"]
         dirs = ["up", "down", "higher", "above", "below", "reach", "hit", "exceed"]
-        return [m for m in markets if
+        filtered = [m for m in markets if
                 any(a in m.get("question", "").lower() for a in assets) and
                 any(d in m.get("question", "").lower() for d in dirs)]
+        print(f"  After filter: {len(filtered)}")
+        return filtered
     except Exception as e:
-        print(f"  Crypto markets: {[m.get('question','') for m in markets[:5]]}")
+        print(f"Polymarket crypto fetch error: {e}")
         return []
 
 def get_crypto_symbol(question):
