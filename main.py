@@ -130,7 +130,7 @@ def run_crypto_scan(btc_prob, eth_prob):
             f"📈 <b>Binance implied:</b> {implied*100:.1f}¢\n"
             f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n"
             f"💧 <b>24h volume:</b> {vol_str}\n\n"
-            f"🔗 <a href='https://polymarket.com/event/{m.get('slug','')}'}>Bet on Polymarket</a>\n\n"
+            f"🔗 <a href='https://polymarket.com/event/{m.get('slug','')}'>Bet on Polymarket</a>\n\n"
             f"<i>Signal only — not financial advice.</i>"
         )
         signals += 1
@@ -230,7 +230,7 @@ def run_sports_scan():
                 f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
                 f"🏀 <b>Vegas implied:</b> {vegas_prob*100:.1f}¢\n"
                 f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n\n"
-                f"🔗 <a href='https://polymarket.com/event/{m.get('slug','')}'}>Bet on Polymarket</a>\n\n"
+                f"🔗 <a href='https://polymarket.com/event/{m.get('slug','')}'>Bet on Polymarket</a>\n\n"
                 f"<i>Signal only — not financial advice.</i>"
             )
             signals += 1
@@ -338,7 +338,7 @@ def run_weather_scan():
                     f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
                     f"🌧 <b>NOAA forecast:</b> {rain_prob*100:.0f}% chance\n"
                     f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n\n"
-                    f"🔗 <a href='https://polymarket.com/event/{m.get('slug','')}'}>Bet on Polymarket</a>\n\n"
+                    f"🔗 <a href='https://polymarket.com/event/{m.get('slug','')}'>Bet on Polymarket</a>\n\n"
                     f"<i>Signal only — not financial advice.</i>"
                 )
                 signals += 1
