@@ -313,7 +313,7 @@ def fetch_polymarkets_crypto():
                 any(a in m.get("question", "").lower() for a in assets) and
                 any(d in m.get("question", "").lower() for d in dirs)]
     except Exception as e:
-        print(f"Polymarket crypto fetch error: {e}")
+        print(f"  Crypto markets: {[m.get('question','') for m in markets[:5]]}")
         return []
 
 def get_crypto_symbol(question):
