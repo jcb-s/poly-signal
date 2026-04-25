@@ -17,10 +17,15 @@ POLL_INTERVAL  = 30
 # ──────────────────────────────────────────────────────────────────────────────
 
 GAMMA_API    = "https://gamma-api.polymarket.com"
-BYBIT_API = "https://api.bybit.com/v5/market"
-KRAKEN_API = "https://api.kraken.com/0/public"
 ODDS_API     = "https://api.the-odds-api.com/v4"
 NOAA_API     = "https://api.weather.gov"
+BYBIT_API    = "https://api.bybit.com/v5/market"
+KRAKEN_API   = "https://api.kraken.com/0/public"
+
+KRAKEN_SYMBOLS = {
+    "BTC": "XXBTZUSD", "ETH": "XETHZUSD", "SOL": "SOLUSD",
+    "XRP": "XXRPZUSD", "DOGE": "XDGUSD"
+}
 
 SPORTS_LEAGUES = [
     "basketball_nba", "icehockey_nhl", "americanfootball_nfl",
