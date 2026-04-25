@@ -9,8 +9,8 @@ from datetime import datetime
 TG_TOKEN       = os.environ.get("TG_TOKEN")
 TG_CHAT_ID     = os.environ.get("TG_CHAT_ID")
 ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")
-EDGE_THRESHOLD = 0.06  # 6% minimum edge
-POLL_INTERVAL  = 30    # seconds between scans
+EDGE_THRESHOLD = 0.04  # lowered to 4%
+POLL_INTERVAL  = 30
 # ──────────────────────────────────────────────────────────────────────────────
 
 GAMMA_API    = "https://gamma-api.polymarket.com"
@@ -18,6 +18,19 @@ BINANCE_API  = "https://api.binance.com/api/v3"
 BINANCE_FAPI = "https://fapi.binance.com/fapi/v1"
 ODDS_API     = "https://api.the-odds-api.com/v4"
 NOAA_API     = "https://api.weather.gov"
+
+# Sports leagues to scan — add/remove as needed
+SPORTS_LEAGUES = [
+    "basketball_nba",
+    "icehockey_nhl",
+    "americanfootball_nfl",
+    "baseball_mlb",
+    "soccer_epl",
+    "soccer_mls",
+]
+
+# Crypto pairs to scan
+CRYPTO_PAIRS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 
 alerted = set()
 
@@ -81,13 +94,14 @@ def fetch_funding(symbol):
 def fetch_polymarkets_crypto():
     try:
         r = requests.get(f"{GAMMA_API}/markets",
-            params={"active": "true", "tag_slug": "crypto", "limit": 30,
+            params={"active": "true", "tag_slug": "crypto", "limit": 100,
                     "order": "volume", "ascending": "false"}, timeout=10)
         if not r.ok:
             return []
         data    = r.json()
         markets = data.get("markets", data) if isinstance(data, dict) else data
-        assets  = ["btc", "bitcoin", "eth", "ethereum"]
+        assets  = ["btc", "bitcoin", "eth", "ethereum", "sol", "solana",
+                   "xrp", "ripple", "doge", "dogecoin"]
         dirs    = ["up", "down", "higher", "above", "below"]
         return [m for m in markets if
                 any(a in m.get("question","").lower() for a in assets) and
@@ -96,7 +110,19 @@ def fetch_polymarkets_crypto():
         print(f"Polymarket crypto fetch error: {e}")
         return []
 
-def run_crypto_scan(btc_prob, eth_prob):
+def get_crypto_symbol(question):
+    q = question.lower()
+    if "sol" in q or "solana" in q:
+        return "SOL"
+    if "xrp" in q or "ripple" in q:
+        return "XRP"
+    if "doge" in q or "dogecoin" in q:
+        return "DOGE"
+    if "eth" in q or "ethereum" in q:
+        return "ETH"
+    return "BTC"
+
+def run_crypto_scan(implied_probs):
     markets = fetch_polymarkets_crypto()
     signals = 0
     for m in markets:
@@ -110,8 +136,8 @@ def run_crypto_scan(btc_prob, eth_prob):
         except:
             pass
 
-        is_btc  = "btc" in question.lower() or "bitcoin" in question.lower()
-        implied = btc_prob if is_btc else eth_prob
+        symbol  = get_crypto_symbol(question)
+        implied = implied_probs.get(symbol)
         if implied is None:
             continue
 
@@ -153,98 +179,106 @@ def moneyline_to_prob(american):
     else:
         return abs(american) / (abs(american) + 100)
 
-def fetch_vegas_odds():
+def fetch_vegas_odds_for_league(league):
     if not ODDS_API_KEY:
         return []
     try:
-        r = requests.get(f"{ODDS_API}/sports/basketball_nba/odds",
+        r = requests.get(f"{ODDS_API}/sports/{league}/odds",
             params={"apiKey": ODDS_API_KEY, "regions": "us",
                     "markets": "h2h", "oddsFormat": "american"},
             timeout=10)
-        return r.json() if r.ok else []
+        if r.ok:
+            return r.json()
+        return []
     except:
         return []
 
 def fetch_polymarkets_sports():
     try:
         r = requests.get(f"{GAMMA_API}/markets",
-            params={"active": "true", "tag_slug": "sports", "limit": 50,
+            params={"active": "true", "tag_slug": "sports", "limit": 100,
                     "order": "volume", "ascending": "false"}, timeout=10)
         if not r.ok:
             return []
         data    = r.json()
         markets = data.get("markets", data) if isinstance(data, dict) else data
-        markets = [m for m in markets if m.get("question")]
-        if markets:
-            print(json.dumps(list(markets[0].keys())))
-        return markets
+        return [m for m in markets if m.get("question")]
     except:
         return []
+
 def run_sports_scan():
-    vegas_games = fetch_vegas_odds()
     poly_sports = fetch_polymarkets_sports()
-    if not vegas_games or not poly_sports:
+    if not poly_sports:
         return 0
 
     signals = 0
-    for game in vegas_games:
-        home = game.get("home_team", "")
-        away = game.get("away_team", "")
-        if not home or not away:
+    for league in SPORTS_LEAGUES:
+        vegas_games = fetch_vegas_odds_for_league(league)
+        if not vegas_games:
             continue
 
-        best_home_odds = None
-        for bookmaker in game.get("bookmakers", []):
-            for market in bookmaker.get("markets", []):
-                if market.get("key") != "h2h":
+        for game in vegas_games:
+            home = game.get("home_team", "")
+            away = game.get("away_team", "")
+            if not home or not away:
+                continue
+
+            best_home_odds = None
+            for bookmaker in game.get("bookmakers", []):
+                for market in bookmaker.get("markets", []):
+                    if market.get("key") != "h2h":
+                        continue
+                    for outcome in market.get("outcomes", []):
+                        if outcome["name"] == home:
+                            if best_home_odds is None or outcome["price"] > best_home_odds:
+                                best_home_odds = outcome["price"]
+
+            if best_home_odds is None:
+                continue
+
+            vegas_prob = moneyline_to_prob(best_home_odds)
+
+            for m in poly_sports:
+                question = m.get("question", "")
+                if home.split()[-1].lower() not in question.lower():
                     continue
-                for outcome in market.get("outcomes", []):
-                    if outcome["name"] == home:
-                        if best_home_odds is None or outcome["price"] > best_home_odds:
-                            best_home_odds = outcome["price"]
 
-        if best_home_odds is None:
-            continue
+                poly_price = 0.5
+                try:
+                    outcome_str = m.get("outcomePrices") or m.get("outcomes_prices")
+                    parsed = json.loads(outcome_str) if isinstance(outcome_str, str) else outcome_str
+                    poly_price = float(parsed[0])
+                except:
+                    pass
 
-        vegas_prob = moneyline_to_prob(best_home_odds)
+                edge     = vegas_prob - poly_price
+                abs_edge = abs(edge)
+                if abs_edge < EDGE_THRESHOLD:
+                    continue
 
-        for m in poly_sports:
-            question = m.get("question", "")
-            if home.split()[-1].lower() not in question.lower():
-                continue
+                direction = "YES" if edge > 0 else "NO"
+                key = f"sports:{m.get('slug','')}:{direction}:{round(poly_price,2)}"
+                if key in alerted:
+                    continue
+                alerted.add(key)
 
-            poly_price = 0.5
-            try:
-                outcome_str = m.get("outcomePrices") or m.get("outcomes_prices")
-                parsed = json.loads(outcome_str) if isinstance(outcome_str, str) else outcome_str
-                poly_price = float(parsed[0])
-            except:
-                pass
+                emoji = "🟢" if direction == "YES" else "🔴"
+                league_emoji = {"basketball_nba": "🏀", "icehockey_nhl": "🏒",
+                                "americanfootball_nfl": "🏈", "baseball_mlb": "⚾",
+                                "soccer_epl": "⚽", "soccer_mls": "⚽"}.get(league, "🏆")
 
-            edge     = vegas_prob - poly_price
-            abs_edge = abs(edge)
-            if abs_edge < EDGE_THRESHOLD:
-                continue
-
-            direction = "YES" if edge > 0 else "NO"
-            key = f"sports:{m.get('slug','')}:{direction}:{round(poly_price,2)}"
-            if key in alerted:
-                continue
-            alerted.add(key)
-
-            emoji = "🟢" if direction == "YES" else "🔴"
-            print(f"  ⚡ SPORTS — {question[:50]} | {direction} | +{abs_edge*100:.1f}%")
-            send_telegram(
-                f"{emoji} <b>SPORTS SIGNAL</b>\n\n"
-                f"📋 <b>Market:</b> {question}\n"
-                f"🎯 <b>Bet:</b> {direction}\n"
-                f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
-                f"🏀 <b>Vegas implied:</b> {vegas_prob*100:.1f}¢\n"
-                f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n"
-                f"🔗 <a href='{poly_link(m)}'>Bet on Polymarket</a>\n\n"
-                f"<i>Signal only — not financial advice.</i>"
-            )
-            signals += 1
+                print(f"  ⚡ SPORTS — {question[:50]} | {direction} | +{abs_edge*100:.1f}%")
+                send_telegram(
+                    f"{emoji} <b>SPORTS SIGNAL</b>\n\n"
+                    f"📋 <b>Market:</b> {question}\n"
+                    f"🎯 <b>Bet:</b> {direction}\n"
+                    f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
+                    f"{league_emoji} <b>Vegas implied:</b> {vegas_prob*100:.1f}¢\n"
+                    f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n"
+                    f"🔗 <a href='{poly_link(m)}'>Bet on Polymarket</a>\n\n"
+                    f"<i>Signal only — not financial advice.</i>"
+                )
+                signals += 1
     return signals
 
 
@@ -262,8 +296,7 @@ def fetch_noaa_forecast(office, grid_x, grid_y):
         r = requests.get(
             f"{NOAA_API}/gridpoints/{office}/{grid_x},{grid_y}/forecast",
             headers={"User-Agent": "PolySignalBot/1.0"},
-            timeout=10
-        )
+            timeout=10)
         if not r.ok:
             return None
         periods = r.json().get("properties", {}).get("periods", [])
@@ -285,7 +318,7 @@ def parse_rain_prob(period):
 def fetch_polymarkets_weather():
     try:
         r = requests.get(f"{GAMMA_API}/markets",
-            params={"active": "true", "limit": 50, "order": "volume",
+            params={"active": "true", "limit": 100, "order": "volume",
                     "ascending": "false"}, timeout=10)
         if not r.ok:
             return []
@@ -360,12 +393,15 @@ def run_weather_scan():
 def run_scan():
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Scanning...")
 
-    btc_prob = derive_implied_prob(fetch_klines("BTC"), fetch_funding("BTC"))
-    eth_prob = derive_implied_prob(fetch_klines("ETH"), fetch_funding("ETH"))
-    if btc_prob and eth_prob:
-        print(f"  BTC: {btc_prob*100:.1f}%  ETH: {eth_prob*100:.1f}%")
+    # Fetch all crypto implied probs
+    implied_probs = {}
+    for symbol in CRYPTO_PAIRS:
+        prob = derive_implied_prob(fetch_klines(symbol), fetch_funding(symbol))
+        if prob:
+            implied_probs[symbol] = prob
+    print(f"  Implied: { {k: f'{v*100:.1f}%' for k,v in implied_probs.items()} }")
 
-    crypto_signals  = run_crypto_scan(btc_prob, eth_prob)
+    crypto_signals  = run_crypto_scan(implied_probs)
     sports_signals  = run_sports_scan()
     weather_signals = run_weather_scan()
 
@@ -373,7 +409,7 @@ def run_scan():
     if total == 0:
         print("  No signals this cycle.")
 
-    if len(alerted) > 500:
+    if len(alerted) > 1000:
         alerted.clear()
 
 
@@ -381,16 +417,17 @@ if __name__ == "__main__":
     print("=" * 50)
     print("  POLY SIGNAL ENGINE")
     print(f"  Threshold: {EDGE_THRESHOLD*100:.0f}%  |  Interval: {POLL_INTERVAL}s")
-    print(f"  Sports: {'ON' if ODDS_API_KEY else 'OFF'}")
+    print(f"  Crypto pairs: {', '.join(CRYPTO_PAIRS)}")
+    print(f"  Sports leagues: {len(SPORTS_LEAGUES)}")
     print("=" * 50)
 
     send_telegram(
         f"⚡ <b>Poly Signal Engine started</b>\n\n"
         f"Scanning every {POLL_INTERVAL}s\n"
         f"Edge threshold: {EDGE_THRESHOLD*100:.0f}%\n"
-        f"Crypto: ✅\n"
-        f"Sports (NBA): {'✅' if ODDS_API_KEY else '❌'}\n"
-        f"Weather (NOAA): ✅"
+        f"Crypto: ✅ ({', '.join(CRYPTO_PAIRS)})\n"
+        f"Sports: {'✅' if ODDS_API_KEY else '❌'} ({len(SPORTS_LEAGUES)} leagues)\n"
+        f"Weather: ✅"
     )
 
     while True:
