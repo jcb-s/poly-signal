@@ -553,8 +553,9 @@ def run_weather_scan():
 
     signals = 0
     for city in WEATHER_CITIES:
-        print(f"  Weather {city['name']}: forecast={'ok' if forecast else 'failed'}, markets matched={sum(1 for m in poly_weather if city['name'].lower() in m.get('question','').lower())}")
         forecast = fetch_noaa_forecast(city["office"], city["gridX"], city["gridY"])
+        matched = sum(1 for m in poly_weather if city["name"].lower() in m.get("question","").lower())
+        print(f"  Weather {city['name']}: forecast={'ok' if forecast else 'failed'}, markets matched={matched}")
         if not forecast:
             continue
 
