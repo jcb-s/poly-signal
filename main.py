@@ -169,6 +169,8 @@ def fetch_polymarkets_sports():
             return []
         data    = r.json()
         markets = data.get("markets", data) if isinstance(data, dict) else data
+        if markets:
+    print(json.dumps(list(markets[0].keys())))
         return [m for m in markets if m.get("question")]
     except:
         return []
