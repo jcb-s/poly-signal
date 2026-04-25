@@ -232,8 +232,10 @@ def fetch_klines(symbol):
         r = requests.get(f"{BINANCE_API}/klines",
             params={"symbol": f"{symbol}USDT", "interval": "1m", "limit": 15},
             timeout=10)
+        print(f"  Binance {symbol}: {r.status_code}")
         return r.json() if r.ok else None
-    except:
+    except Exception as e:
+        print(f"  Binance {symbol} error: {e}")
         return None
 
 def fetch_funding(symbol):
@@ -247,18 +249,18 @@ def fetch_funding(symbol):
 def fetch_polymarkets_crypto():
     try:
         r = requests.get(f"{GAMMA_API}/markets",
-            params={"active": "true", "tag_slug": "crypto", "limit": 100,
+            params={"active": "true", "limit": 100,
                     "order": "volume", "ascending": "false"}, timeout=10)
         if not r.ok:
             return []
         data = r.json()
         markets = data.get("markets", data) if isinstance(data, dict) else data
-        assets  = ["btc","bitcoin","eth","ethereum","sol","solana",
-                   "xrp","ripple","doge","dogecoin"]
-        dirs    = ["up","down","higher","above","below"]
+        assets = ["btc", "bitcoin", "eth", "ethereum", "sol", "solana",
+                  "xrp", "ripple", "doge", "dogecoin"]
+        dirs = ["up", "down", "higher", "above", "below", "reach", "hit", "exceed"]
         return [m for m in markets if
-                any(a in m.get("question","").lower() for a in assets) and
-                any(d in m.get("question","").lower() for d in dirs)]
+                any(a in m.get("question", "").lower() for a in assets) and
+                any(d in m.get("question", "").lower() for d in dirs)]
     except Exception as e:
         print(f"Polymarket crypto fetch error: {e}")
         return []
