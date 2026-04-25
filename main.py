@@ -547,8 +547,11 @@ def run_scan(cycle):
         p = derive_implied_prob(fetch_klines(sym), fetch_funding(sym))
         if p:
             implied[sym] = p
-    if implied:
-        print(f"  Implied: { {k: f'{v*100:.1f}%' for k,v in implied.items()} }")
+    print(f"  Crypto implied: {implied}")
+    print(f"  Crypto markets found: {len(fetch_polymarkets_crypto())}")
+    print(f"  Sports markets found: {len(fetch_polymarkets_sports())}")
+    print(f"  Weather markets found: {len(fetch_polymarkets_weather())}")
+    print(f"  Vegas odds (NBA): {len(fetch_vegas_odds_for_league('basketball_nba'))}")
 
     cs = run_crypto_scan(implied)
     ss = run_sports_scan()
@@ -557,7 +560,6 @@ def run_scan(cycle):
     if cs+ss+ws == 0:
         print("  No signals this cycle.")
 
-    # Periodically check for resolutions and update open positions
     if cycle % RESOLUTION_CHECK_EVERY == 0:
         print("  Checking open signals for updates...")
         db_update_open_signals()
