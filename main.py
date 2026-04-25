@@ -17,8 +17,8 @@ POLL_INTERVAL  = 30
 # ──────────────────────────────────────────────────────────────────────────────
 
 GAMMA_API    = "https://gamma-api.polymarket.com"
-BINANCE_API  = "https://api.binance.com/api/v3"
-BINANCE_FAPI = "https://fapi.binance.com/fapi/v1"
+BYBIT_API = "https://api.bybit.com/v5/market"
+KRAKEN_API = "https://api.kraken.com/0/public"
 ODDS_API     = "https://api.the-odds-api.com/v4"
 NOAA_API     = "https://api.weather.gov"
 
@@ -227,22 +227,68 @@ def derive_implied_prob(klines, funding_rate):
     raw = sigmoid(signal * 2 + funding_bias * 0.5 + momentum * 10)
     return max(0.05, min(0.95, raw))
 
-def fetch_klines(symbol):
+def fetch_klines_bybit(symbol):
     try:
-        r = requests.get(f"{BINANCE_API}/klines",
-            params={"symbol": f"{symbol}USDT", "interval": "1m", "limit": 15},
+        r = requests.get(f"{BYBIT_API}/kline",
+            params={"category": "spot", "symbol": f"{symbol}USDT",
+                    "interval": "1", "limit": 15},
             timeout=10)
-        print(f"  Binance {symbol}: {r.status_code}")
-        return r.json() if r.ok else None
+        if not r.ok:
+            return None
+        data = r.json()
+        rows = data.get("result", {}).get("list", [])
+        if not rows:
+            return None
+        # Bybit returns [time, open, high, low, close, volume, turnover]
+        # Reformat to match Binance structure [0]=time [4]=close
+        return [[row[0], row[1], row[2], row[3], row[4]] for row in rows]
     except Exception as e:
-        print(f"  Binance {symbol} error: {e}")
+        print(f"  Bybit {symbol} error: {e}")
         return None
+
+def fetch_klines_kraken(symbol):
+    try:
+        pair = KRAKEN_SYMBOLS.get(symbol)
+        if not pair:
+            return None
+        r = requests.get(f"{KRAKEN_API}/OHLC",
+            params={"pair": pair, "interval": 1},
+            timeout=10)
+        if not r.ok:
+            return None
+        data = r.json()
+        result = data.get("result", {})
+        rows = result.get(pair) or result.get(list(result.keys())[0])
+        if not rows:
+            return None
+        # Kraken returns [time, open, high, low, close, vwap, volume, count]
+        return [[row[0], row[1], row[2], row[3], row[4]] for row in rows[-15:]]
+    except Exception as e:
+        print(f"  Kraken {symbol} error: {e}")
+        return None
+
+def fetch_klines(symbol):
+    data = fetch_klines_bybit(symbol)
+    if data:
+        print(f"  {symbol}: Bybit ✅")
+        return data
+    print(f"  {symbol}: Bybit failed, trying Kraken...")
+    data = fetch_klines_kraken(symbol)
+    if data:
+        print(f"  {symbol}: Kraken ✅")
+        return data
+    print(f"  {symbol}: both sources failed")
+    return None
 
 def fetch_funding(symbol):
     try:
-        r = requests.get(f"{BINANCE_FAPI}/fundingRate",
-            params={"symbol": f"{symbol}USDT", "limit": 1}, timeout=10)
-        return r.json()[0]["fundingRate"] if r.ok else None
+        r = requests.get(f"{BYBIT_API}/funding/history",
+            params={"category": "linear", "symbol": f"{symbol}USDT", "limit": 1},
+            timeout=10)
+        if not r.ok:
+            return None
+        rows = r.json().get("result", {}).get("list", [])
+        return rows[0].get("fundingRate") if rows else None
     except:
         return None
 
