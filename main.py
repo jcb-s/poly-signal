@@ -34,7 +34,12 @@ def send_telegram(message):
         print(f"Telegram error: {e}")
 
 def poly_link(m):
-    slug = m.get("eventSlug") or m.get("slug", "")
+    events = m.get("events")
+    if events and len(events) > 0:
+        event_slug = events[0].get("slug", "")
+        if event_slug:
+            return f"https://polymarket.com/event/{event_slug}"
+    slug = m.get("slug", "")
     return f"https://polymarket.com/event/{slug}"
 
 
