@@ -29,7 +29,9 @@ SPORTS_LEAGUES = [
 CRYPTO_PAIRS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 
 alerted = set()
-
+vegas_cache = {}
+vegas_cache_time = {}
+VEGAS_CACHE_TTL = 3600  # refresh odds once per hour
 
 # ─── DATABASE ─────────────────────────────────────────────────────────────────
 def db_connect():
@@ -356,14 +358,24 @@ def run_sports_scan():
         return 0
 
     signals = 0
+    now = time.time()
+
     for league in SPORTS_LEAGUES:
-        vegas_games = fetch_vegas_odds_for_league(league)
+        # Only fetch fresh odds if cache is stale
+        if league not in vegas_cache or (now - vegas_cache_time.get(league, 0)) > VEGAS_CACHE_TTL:
+            fresh = fetch_vegas_odds_for_league(league)
+            if fresh:
+                vegas_cache[league] = fresh
+                vegas_cache_time[league] = now
+                print(f"  Refreshed odds: {league}")
+
+        vegas_games = vegas_cache.get(league, [])
         if not vegas_games:
             continue
 
         for game in vegas_games:
-            home = game.get("home_team","")
-            away = game.get("away_team","")
+            home = game.get("home_team", "")
+            away = game.get("away_team", "")
             if not home or not away:
                 continue
 
@@ -383,7 +395,7 @@ def run_sports_scan():
             vegas_prob = moneyline_to_prob(best_home_odds)
 
             for m in poly_sports:
-                question = m.get("question","")
+                question = m.get("question", "")
                 if home.split()[-1].lower() not in question.lower():
                     continue
 
@@ -401,7 +413,7 @@ def run_sports_scan():
                     continue
 
                 direction = "YES" if edge > 0 else "NO"
-                key = f"sports:{m.get('slug','')}:{direction}:{round(poly_price,2)}"
+                key = f"sports:{m.get('slug', '')}:{direction}:{round(poly_price, 2)}"
                 if key in alerted:
                     continue
                 alerted.add(key)
@@ -409,9 +421,9 @@ def run_sports_scan():
                 db_log_signal("sports", m, direction, poly_price, vegas_prob, abs_edge)
 
                 emoji = "🟢" if direction == "YES" else "🔴"
-                league_emoji = {"basketball_nba":"🏀","icehockey_nhl":"🏒",
-                                "americanfootball_nfl":"🏈","baseball_mlb":"⚾",
-                                "soccer_epl":"⚽","soccer_mls":"⚽"}.get(league,"🏆")
+                league_emoji = {"basketball_nba": "🏀", "icehockey_nhl": "🏒",
+                                "americanfootball_nfl": "🏈", "baseball_mlb": "⚾",
+                                "soccer_epl": "⚽", "soccer_mls": "⚽"}.get(league, "🏆")
 
                 print(f"  ⚡ SPORTS — {question[:50]} | {direction} | +{abs_edge*100:.1f}%")
                 send_telegram(
