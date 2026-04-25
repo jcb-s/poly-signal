@@ -169,12 +169,12 @@ def fetch_polymarkets_sports():
             return []
         data    = r.json()
         markets = data.get("markets", data) if isinstance(data, dict) else data
-            if markets:
-                print(json.dumps(list(markets[0].keys())))
-            return [m for m in markets if m.get("question")]
+        markets = [m for m in markets if m.get("question")]
+        if markets:
+            print(json.dumps(list(markets[0].keys())))
+        return markets
     except:
         return []
-
 def run_sports_scan():
     vegas_games = fetch_vegas_odds()
     poly_sports = fetch_polymarkets_sports()
