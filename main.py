@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 TG_TOKEN       = os.environ.get("TG_TOKEN")
 TG_CHAT_ID     = os.environ.get("TG_CHAT_ID")
-ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")
+_raw_odds_keys = os.environ.get("ODDS_API_KEYS") or os.environ.get("ODDS_API_KEY", "")
+ODDS_API_KEYS  = [k.strip() for k in _raw_odds_keys.split(",") if k.strip()]
+_odds_key_idx  = [0]  # mutable so fetch_vegas_odds_for_league can rotate without global
 DATABASE_URL   = os.environ.get("DATABASE_URL")
 EDGE_THRESHOLD = 0.04
 POLL_INTERVAL  = 30
@@ -418,16 +420,29 @@ def moneyline_to_prob(american):
     return (100/(american+100)) if american > 0 else (abs(american)/(abs(american)+100))
 
 def fetch_vegas_odds_for_league(league):
-    if not ODDS_API_KEY:
+    if not ODDS_API_KEYS:
         return []
-    try:
-        r = requests.get(f"{ODDS_API}/sports/{league}/odds",
-            params={"apiKey": ODDS_API_KEY, "regions": "us",
-                    "markets": "h2h", "oddsFormat": "american"},
-            timeout=10)
-        return r.json() if r.ok else []
-    except:
-        return []
+    n = len(ODDS_API_KEYS)
+    for attempt in range(n):
+        key = ODDS_API_KEYS[_odds_key_idx[0]]
+        try:
+            r = requests.get(f"{ODDS_API}/sports/{league}/odds",
+                params={"apiKey": key, "regions": "us",
+                        "markets": "h2h", "oddsFormat": "american"},
+                timeout=10)
+            if r.ok:
+                return r.json()
+            if r.status_code in (401, 429):
+                next_idx = (_odds_key_idx[0] + 1) % n
+                print(f"  Odds API key {_odds_key_idx[0]+1}/{n} got {r.status_code} on {league}, rotating to key {next_idx+1}")
+                _odds_key_idx[0] = next_idx
+                continue
+            return []
+        except Exception as e:
+            print(f"  Odds API error (key {_odds_key_idx[0]+1}/{n}): {e}")
+            return []
+    print(f"  Odds API: all {n} keys returned 401/429 for {league}")
+    return []
 
 def fetch_polymarkets_sports():
     try:
@@ -867,7 +882,7 @@ if __name__ == "__main__":
         f"Scanning every {POLL_INTERVAL}s\n"
         f"Edge threshold: {EDGE_THRESHOLD*100:.0f}%\n"
         f"Crypto: ✅ ({', '.join(CRYPTO_PAIRS)})\n"
-        f"Sports: {'✅' if ODDS_API_KEY else '❌'} ({len(SPORTS_LEAGUES)} leagues)\n"
+        f"Sports: {'✅' if ODDS_API_KEYS else '❌'} ({len(SPORTS_LEAGUES)} leagues, {len(ODDS_API_KEYS)} key(s))\n"
         f"Weather: ✅\n"
         f"Logging: {'✅ Postgres' if DATABASE_URL else '❌'}"
     )
