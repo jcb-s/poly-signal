@@ -6,7 +6,7 @@ import os
 import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 TG_TOKEN       = os.environ.get("TG_TOKEN")
@@ -35,6 +35,16 @@ SPORTS_LEAGUES = [
 CRYPTO_PAIRS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 
 alerted = set()
+
+def is_market_expired(market):
+    end = market.get("endDate") or market.get("endDateIso")
+    if not end:
+        return False
+    try:
+        return datetime.fromisoformat(end.replace("Z", "+00:00")) < datetime.now(timezone.utc)
+    except Exception:
+        return False
+
 vegas_cache = {}
 vegas_cache_time = {}
 VEGAS_CACHE_TTL = 3600  # refresh odds once per hour
@@ -336,6 +346,13 @@ def run_crypto_scan(implied_probs):
     for m in markets:
         question = m.get("question","")
         slug     = m.get("slug","")
+
+        if is_market_expired(m):
+            continue
+        key = f"crypto:{slug}"
+        if key in alerted:
+            continue
+
         poly_price = 0.5
         try:
             outcome_str = m.get("outcomePrices") or m.get("outcomes_prices")
@@ -355,9 +372,6 @@ def run_crypto_scan(implied_probs):
             continue
 
         direction = "YES" if edge > 0 else "NO"
-        key = f"crypto:{slug}:{direction}:{round(poly_price,2)}"
-        if key in alerted:
-            continue
         alerted.add(key)
 
         db_log_signal("crypto", m, direction, poly_price, implied, abs_edge)
@@ -458,6 +472,12 @@ def run_sports_scan():
                 if home.split()[-1].lower() not in question.lower():
                     continue
 
+                if is_market_expired(m):
+                    continue
+                key = f"sports:{m.get('slug', '')}"
+                if key in alerted:
+                    continue
+
                 poly_price = 0.5
                 try:
                     outcome_str = m.get("outcomePrices") or m.get("outcomes_prices")
@@ -472,9 +492,6 @@ def run_sports_scan():
                     continue
 
                 direction = "YES" if edge > 0 else "NO"
-                key = f"sports:{m.get('slug', '')}:{direction}:{round(poly_price, 2)}"
-                if key in alerted:
-                    continue
                 alerted.add(key)
 
                 db_log_signal("sports", m, direction, poly_price, vegas_prob, abs_edge)
@@ -513,26 +530,39 @@ WEATHER_CITIES = [
     {"name": "Phoenix",       "lat": 33.4484,  "lon": -112.0740},
 ]
 
-_noaa_grid_cache = {}
+_noaa_grid_cache = {}    # (lat,lon) -> (office, grid_x, grid_y, stations_url)
+_noaa_station_cache = {} # stations_url -> station_id
+
+def _noaa_points(lat, lon):
+    """Populate _noaa_grid_cache for (lat, lon). Returns True on success."""
+    cache_key = (lat, lon)
+    if cache_key in _noaa_grid_cache:
+        return True
+    try:
+        pts = requests.get(
+            f"{NOAA_API}/points/{lat},{lon}",
+            headers={"User-Agent": "PolySignalBot/1.0"}, timeout=10)
+        if not pts.ok:
+            print(f"  NOAA /points {lat},{lon} failed: {pts.status_code}")
+            return False
+        props = pts.json().get("properties", {})
+        _noaa_grid_cache[cache_key] = (
+            props.get("gridId"),
+            props.get("gridX"),
+            props.get("gridY"),
+            props.get("observationStations"),
+        )
+        return True
+    except Exception as e:
+        print(f"  NOAA /points error ({lat},{lon}): {e}")
+        return False
 
 def fetch_noaa_forecast(lat, lon):
     """Fetch NOAA forecast, resolving gridpoints dynamically from lat/lon."""
     try:
-        cache_key = (lat, lon)
-        if cache_key not in _noaa_grid_cache:
-            pts = requests.get(
-                f"{NOAA_API}/points/{lat},{lon}",
-                headers={"User-Agent": "PolySignalBot/1.0"}, timeout=10)
-            if not pts.ok:
-                print(f"  NOAA /points {lat},{lon} failed: {pts.status_code}")
-                return None
-            props = pts.json().get("properties", {})
-            _noaa_grid_cache[cache_key] = (
-                props.get("gridId"),
-                props.get("gridX"),
-                props.get("gridY"),
-            )
-        office, grid_x, grid_y = _noaa_grid_cache[cache_key]
+        if not _noaa_points(lat, lon):
+            return None
+        office, grid_x, grid_y, _ = _noaa_grid_cache[(lat, lon)]
         if not office:
             print(f"  NOAA /points returned no gridId for {lat},{lon}")
             return None
@@ -546,6 +576,43 @@ def fetch_noaa_forecast(lat, lon):
         return periods[:4] if periods else None
     except Exception as e:
         print(f"  NOAA fetch error ({lat},{lon}): {e}")
+        return None
+
+def fetch_noaa_current_temp(lat, lon):
+    """Return current observed temperature in °F from the nearest NOAA station."""
+    try:
+        if not _noaa_points(lat, lon):
+            return None
+        _, _, _, stations_url = _noaa_grid_cache[(lat, lon)]
+        if not stations_url:
+            return None
+
+        if stations_url not in _noaa_station_cache:
+            sr = requests.get(stations_url,
+                              headers={"User-Agent": "PolySignalBot/1.0"}, timeout=10)
+            if not sr.ok:
+                return None
+            features = sr.json().get("features", [])
+            if not features:
+                return None
+            sid = features[0].get("properties", {}).get("stationIdentifier")
+            _noaa_station_cache[stations_url] = sid
+
+        station_id = _noaa_station_cache.get(stations_url)
+        if not station_id:
+            return None
+
+        obs = requests.get(
+            f"{NOAA_API}/stations/{station_id}/observations/latest",
+            headers={"User-Agent": "PolySignalBot/1.0"}, timeout=10)
+        if not obs.ok:
+            return None
+        temp_c = obs.json().get("properties", {}).get("temperature", {}).get("value")
+        if temp_c is None:
+            return None
+        return temp_c * 9 / 5 + 32
+    except Exception as e:
+        print(f"  NOAA current temp error ({lat},{lon}): {e}")
         return None
 
 def parse_rain_prob(period):
@@ -652,6 +719,12 @@ def run_weather_scan():
             if city["name"].lower() not in question.lower():
                 continue
 
+            if is_market_expired(m):
+                continue
+            key = f"weather:{m.get('slug', '')}"
+            if key in alerted:
+                continue
+
             poly_price = 0.5
             try:
                 outcome_str = m.get("outcomePrices") or m.get("outcomes_prices")
@@ -670,6 +743,23 @@ def run_weather_scan():
             is_precip_market = any(w in q_lower for w in ["rain", "precipitation", "snow", "storm"])
 
             if is_temp_market:
+                # If the current observed temp already exceeds the market's upper
+                # bound, the range cannot resolve YES — skip before doing anything else.
+                upper_bound_f = None
+                m_ub = re.search(r'between\s+(\d+)[–\-](\d+)\s*°?f', q_lower)
+                if m_ub:
+                    upper_bound_f = float(m_ub.group(2))
+                else:
+                    m_ub_c = re.search(r'between\s+(\d+)[–\-](\d+)\s*°?c', q_lower)
+                    if m_ub_c:
+                        upper_bound_f = float(m_ub_c.group(2)) * 9 / 5 + 32
+
+                if upper_bound_f is not None:
+                    current_temp_f = fetch_noaa_current_temp(city["lat"], city["lon"])
+                    if current_temp_f is not None and current_temp_f > upper_bound_f:
+                        print(f"    Skip (obs {current_temp_f:.1f}°F > ceiling {upper_bound_f:.0f}°F): {question[:50]!r}")
+                        continue
+
                 daytime = next((p for p in forecast if p.get("isDaytime", True)), forecast[0])
                 temp_f = parse_temp_from_forecast(daytime)
                 if temp_f is not None:
@@ -693,9 +783,6 @@ def run_weather_scan():
                 continue
 
             direction = "YES" if edge > 0 else "NO"
-            key = f"weather:{m.get('slug', '')}:{direction}:{round(poly_price, 2)}"
-            if key in alerted:
-                continue
             alerted.add(key)
 
             db_log_signal("weather", m, direction, poly_price, implied, abs_edge)
