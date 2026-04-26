@@ -117,6 +117,23 @@ def db_log_signal(signal_type, market, direction, entry_price, implied_price, ed
     except Exception as e:
         print(f"DB log error: {e}")
 
+def db_load_alerted():
+    """Seed the in-memory alerted set from open DB signals so restarts don't re-fire the same slug."""
+    if not DATABASE_URL:
+        return
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT signal_type, market_slug FROM signals WHERE resolved = FALSE"
+                )
+                rows = cur.fetchall()
+        for signal_type, slug in rows:
+            alerted.add(f"{signal_type}:{slug}")
+        print(f"  Seeded {len(rows)} slugs into alerted from DB.")
+    except Exception as e:
+        print(f"DB load alerted error: {e}")
+
 def db_update_open_signals():
     """Refresh current_price + check for resolutions on open signals."""
     if not DATABASE_URL:
@@ -843,6 +860,7 @@ if __name__ == "__main__":
     print("=" * 50)
 
     db_init()
+    db_load_alerted()
 
     send_telegram(
         f"⚡ <b>Poly Signal Engine started</b>\n\n"
