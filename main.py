@@ -1,3 +1,4 @@
+import re
 import requests
 import time
 import math
@@ -500,34 +501,121 @@ def run_sports_scan():
 
 # ─── WEATHER SIGNAL ───────────────────────────────────────────────────────────
 WEATHER_CITIES = [
-    {"name":"New York","office":"OKX","gridX":33,"gridY":37},
-    {"name":"Los Angeles","office":"LOX","gridX":149,"gridY":48},
-    {"name":"Chicago","office":"LOT","gridX":76,"gridY":73},
-    {"name":"Houston","office":"HGX","gridX":66,"gridY":98},
-    {"name":"Miami","office":"MFL","gridX":110,"gridY":38},
+    {"name": "New York",      "lat": 40.7128,  "lon": -74.0060},
+    {"name": "Los Angeles",   "lat": 34.0522,  "lon": -118.2437},
+    {"name": "Chicago",       "lat": 41.8781,  "lon": -87.6298},
+    {"name": "Houston",       "lat": 29.7604,  "lon": -95.3698},
+    {"name": "Miami",         "lat": 25.7617,  "lon": -80.1918},
+    {"name": "Atlanta",       "lat": 33.7490,  "lon": -84.3880},
+    {"name": "San Francisco", "lat": 37.7749,  "lon": -122.4194},
+    {"name": "Dallas",        "lat": 32.7767,  "lon": -96.7970},
+    {"name": "Seattle",       "lat": 47.6062,  "lon": -122.3321},
+    {"name": "Phoenix",       "lat": 33.4484,  "lon": -112.0740},
 ]
 
-def fetch_noaa_forecast(office, grid_x, grid_y):
+_noaa_grid_cache = {}
+
+def fetch_noaa_forecast(lat, lon):
+    """Fetch NOAA forecast, resolving gridpoints dynamically from lat/lon."""
     try:
+        cache_key = (lat, lon)
+        if cache_key not in _noaa_grid_cache:
+            pts = requests.get(
+                f"{NOAA_API}/points/{lat},{lon}",
+                headers={"User-Agent": "PolySignalBot/1.0"}, timeout=10)
+            if not pts.ok:
+                print(f"  NOAA /points {lat},{lon} failed: {pts.status_code}")
+                return None
+            props = pts.json().get("properties", {})
+            _noaa_grid_cache[cache_key] = (
+                props.get("gridId"),
+                props.get("gridX"),
+                props.get("gridY"),
+            )
+        office, grid_x, grid_y = _noaa_grid_cache[cache_key]
+        if not office:
+            print(f"  NOAA /points returned no gridId for {lat},{lon}")
+            return None
         r = requests.get(
             f"{NOAA_API}/gridpoints/{office}/{grid_x},{grid_y}/forecast",
-            headers={"User-Agent":"PolySignalBot/1.0"}, timeout=10)
+            headers={"User-Agent": "PolySignalBot/1.0"}, timeout=10)
         if not r.ok:
+            print(f"  NOAA forecast {office}/{grid_x},{grid_y} failed: {r.status_code}")
             return None
-        periods = r.json().get("properties",{}).get("periods",[])
+        periods = r.json().get("properties", {}).get("periods", [])
         return periods[:4] if periods else None
-    except:
+    except Exception as e:
+        print(f"  NOAA fetch error ({lat},{lon}): {e}")
         return None
 
 def parse_rain_prob(period):
-    prob = period.get("probabilityOfPrecipitation",{})
+    prob = period.get("probabilityOfPrecipitation", {})
     if prob and prob.get("value") is not None:
-        return prob["value"]/100.0
-    text = period.get("detailedForecast","").lower()
-    for phrase, val in [("slight chance",0.2),("chance of rain",0.4),
-                        ("likely",0.65),("definitely",0.85)]:
+        return prob["value"] / 100.0
+    text = period.get("detailedForecast", "").lower()
+    for phrase, val in [("slight chance", 0.2), ("chance of", 0.4),
+                        ("likely", 0.65), ("rain and thunderstorms", 0.8)]:
         if phrase in text:
             return val
+    return None
+
+def parse_temp_from_forecast(period):
+    """Returns forecast temperature in °F."""
+    temp = period.get("temperature")
+    unit = period.get("temperatureUnit", "F")
+    if temp is None:
+        return None
+    if unit == "C":
+        temp = temp * 9 / 5 + 32
+    return float(temp)
+
+def implied_prob_for_temp_market(question, forecast_temp_f):
+    """Derive implied probability from NOAA temp vs market question threshold."""
+    q = question.lower()
+
+    # "between X-Y°F" or "between X–Y°F"
+    m = re.search(r'between\s+(\d+)[–\-](\d+)\s*°?f', q)
+    if m:
+        low, high = float(m.group(1)), float(m.group(2))
+        if low <= forecast_temp_f <= high:
+            return 0.72
+        diff = min(abs(forecast_temp_f - low), abs(forecast_temp_f - high))
+        return max(0.05, 0.72 - diff * 0.06)
+
+    # "X°F or higher/above"
+    m = re.search(r'(\d+)\s*°?f\s+or\s+(?:higher|above)', q)
+    if m:
+        threshold = float(m.group(1))
+        return min(0.95, max(0.05, 0.5 + (forecast_temp_f - threshold) * 0.05))
+
+    # "X°F or below/lower"
+    m = re.search(r'(\d+)\s*°?f\s+or\s+(?:below|lower)', q)
+    if m:
+        threshold = float(m.group(1))
+        return min(0.95, max(0.05, 0.5 + (threshold - forecast_temp_f) * 0.05))
+
+    # "between X-Y°C"
+    m = re.search(r'between\s+(\d+)[–\-](\d+)\s*°?c', q)
+    if m:
+        low_f = float(m.group(1)) * 9 / 5 + 32
+        high_f = float(m.group(2)) * 9 / 5 + 32
+        if low_f <= forecast_temp_f <= high_f:
+            return 0.72
+        diff = min(abs(forecast_temp_f - low_f), abs(forecast_temp_f - high_f))
+        return max(0.05, 0.72 - diff * 0.06)
+
+    # "X°C or higher/above"
+    m = re.search(r'(\d+)\s*°?c\s+or\s+(?:higher|above)', q)
+    if m:
+        threshold_f = float(m.group(1)) * 9 / 5 + 32
+        return min(0.95, max(0.05, 0.5 + (forecast_temp_f - threshold_f) * 0.05))
+
+    # "X°C or below/lower"
+    m = re.search(r'(\d+)\s*°?c\s+or\s+(?:below|lower)', q)
+    if m:
+        threshold_f = float(m.group(1)) * 9 / 5 + 32
+        return min(0.95, max(0.05, 0.5 + (threshold_f - forecast_temp_f) * 0.05))
+
     return None
 
 def fetch_polymarkets_weather():
@@ -553,58 +641,78 @@ def run_weather_scan():
 
     signals = 0
     for city in WEATHER_CITIES:
-        forecast = fetch_noaa_forecast(city["office"], city["gridX"], city["gridY"])
-        matched = sum(1 for m in poly_weather if city["name"].lower() in m.get("question","").lower())
+        forecast = fetch_noaa_forecast(city["lat"], city["lon"])
+        matched = sum(1 for m in poly_weather if city["name"].lower() in m.get("question", "").lower())
         print(f"  Weather {city['name']}: forecast={'ok' if forecast else 'failed'}, markets matched={matched}")
         if not forecast:
             continue
 
-        for period in forecast:
-            rain_prob = parse_rain_prob(period)
-            if rain_prob is None:
+        for m in poly_weather:
+            question = m.get("question", "")
+            if city["name"].lower() not in question.lower():
                 continue
 
-            for m in poly_weather:
-                question = m.get("question","")
-                if city["name"].lower() not in question.lower():
-                    continue
-                if "rain" not in question.lower() and "precipitation" not in question.lower():
-                    continue
+            poly_price = 0.5
+            try:
+                outcome_str = m.get("outcomePrices") or m.get("outcomes_prices")
+                parsed = json.loads(outcome_str) if isinstance(outcome_str, str) else outcome_str
+                poly_price = float(parsed[0])
+            except:
+                pass
 
-                poly_price = 0.5
-                try:
-                    outcome_str = m.get("outcomePrices") or m.get("outcomes_prices")
-                    parsed = json.loads(outcome_str) if isinstance(outcome_str, str) else outcome_str
-                    poly_price = float(parsed[0])
-                except:
-                    pass
+            # Determine market type and derive implied probability
+            implied = None
+            signal_label = ""
+            q_lower = question.lower()
 
-                edge = rain_prob - poly_price
-                abs_edge = abs(edge)
-                if abs_edge < EDGE_THRESHOLD:
-                    continue
+            is_temp_market = any(w in q_lower for w in
+                                 ["temperature", "°f", "°c", "fahrenheit", "celsius", "degrees"])
+            is_precip_market = any(w in q_lower for w in ["rain", "precipitation", "snow", "storm"])
 
-                direction = "YES" if edge > 0 else "NO"
-                key = f"weather:{m.get('slug','')}:{direction}:{round(poly_price,2)}"
-                if key in alerted:
-                    continue
-                alerted.add(key)
+            if is_temp_market:
+                daytime = next((p for p in forecast if p.get("isDaytime", True)), forecast[0])
+                temp_f = parse_temp_from_forecast(daytime)
+                if temp_f is not None:
+                    implied = implied_prob_for_temp_market(question, temp_f)
+                    signal_label = f"🌡️ NOAA temp: {temp_f:.0f}°F → implied"
 
-                db_log_signal("weather", m, direction, poly_price, rain_prob, abs_edge)
+            if implied is None and is_precip_market:
+                for period in forecast:
+                    rain_prob = parse_rain_prob(period)
+                    if rain_prob is not None:
+                        implied = rain_prob
+                        signal_label = f"🌧 NOAA precip: {rain_prob*100:.0f}% → implied"
+                        break
 
-                emoji = "🟢" if direction == "YES" else "🔴"
-                print(f"  ⚡ WEATHER — {question[:50]} | {direction} | +{abs_edge*100:.1f}%")
-                send_telegram(
-                    f"{emoji} <b>WEATHER SIGNAL</b>\n\n"
-                    f"📋 <b>Market:</b> {question}\n"
-                    f"🎯 <b>Bet:</b> {direction}\n"
-                    f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
-                    f"🌧 <b>NOAA forecast:</b> {rain_prob*100:.0f}% chance\n"
-                    f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n"
-                    f"🔗 <a href='{poly_link(m)}'>Bet on Polymarket</a>\n\n"
-                    f"<i>Signal only — not financial advice.</i>"
-                )
-                signals += 1
+            if implied is None:
+                continue
+
+            edge = implied - poly_price
+            abs_edge = abs(edge)
+            if abs_edge < EDGE_THRESHOLD:
+                continue
+
+            direction = "YES" if edge > 0 else "NO"
+            key = f"weather:{m.get('slug', '')}:{direction}:{round(poly_price, 2)}"
+            if key in alerted:
+                continue
+            alerted.add(key)
+
+            db_log_signal("weather", m, direction, poly_price, implied, abs_edge)
+
+            emoji = "🟢" if direction == "YES" else "🔴"
+            print(f"  ⚡ WEATHER — {question[:50]} | {direction} | +{abs_edge*100:.1f}%")
+            send_telegram(
+                f"{emoji} <b>WEATHER SIGNAL</b>\n\n"
+                f"📋 <b>Market:</b> {question}\n"
+                f"🎯 <b>Bet:</b> {direction}\n"
+                f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
+                f"{signal_label}: {implied*100:.0f}¢\n"
+                f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n"
+                f"🔗 <a href='{poly_link(m)}'>Bet on Polymarket</a>\n\n"
+                f"<i>Signal only — not financial advice.</i>"
+            )
+            signals += 1
     return signals
 
 
