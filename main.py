@@ -18,6 +18,7 @@ _odds_request_count = [0]  # incremented on every live HTTP request to the Odds 
 DATABASE_URL   = os.environ.get("DATABASE_URL")
 EDGE_THRESHOLD = 0.04
 POLL_INTERVAL  = 30
+BOT_VERSION    = os.environ.get("BOT_VERSION", "2.0.0")
 ENABLE_CRYPTO_SIGNALS  = False
 ENABLE_SPORTS_SIGNALS  = False
 ENABLE_WEATHER_SIGNALS = True
@@ -101,6 +102,7 @@ def db_init():
                         ON signals(resolved);
                     CREATE INDEX IF NOT EXISTS idx_signals_slug
                         ON signals(market_slug);
+                    ALTER TABLE signals ADD COLUMN IF NOT EXISTS bot_version TEXT DEFAULT '1.0.0';
                 """)
         print("✅ Database initialized.")
     except Exception as e:
@@ -118,8 +120,9 @@ def db_log_signal(signal_type, market, direction, entry_price, implied_price, ed
                 cur.execute("""
                     INSERT INTO signals
                     (signal_type, market_question, market_slug, event_slug,
-                     condition_id, direction, entry_price, implied_price, edge)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     condition_id, direction, entry_price, implied_price, edge,
+                     bot_version)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     signal_type,
                     market.get("question", ""),
@@ -130,6 +133,7 @@ def db_log_signal(signal_type, market, direction, entry_price, implied_price, ed
                     entry_price,
                     implied_price,
                     edge,
+                    BOT_VERSION,
                 ))
     except Exception as e:
         print(f"DB log error: {e}")
@@ -1129,6 +1133,7 @@ if __name__ == "__main__":
 
     send_telegram(
         f"⚡ <b>Poly Signal Engine started</b>\n\n"
+        f"Version: {BOT_VERSION}\n"
         f"Scanning every {POLL_INTERVAL}s\n"
         f"Edge threshold: {EDGE_THRESHOLD*100:.0f}%\n"
         f"Crypto: {'✅' if ENABLE_CRYPTO_SIGNALS else '⏸'} ({', '.join(CRYPTO_PAIRS)})\n"
