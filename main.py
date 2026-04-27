@@ -20,11 +20,11 @@ EDGE_THRESHOLD = 0.04
 POLL_INTERVAL  = 30
 # ──────────────────────────────────────────────────────────────────────────────
 
-GAMMA_API    = "https://gamma-api.polymarket.com"
-ODDS_API     = "https://api.the-odds-api.com/v4"
-NOAA_API     = "https://api.weather.gov"
-BYBIT_API    = "https://api.bybit.com/v5/market"
-KRAKEN_API   = "https://api.kraken.com/0/public"
+GAMMA_API            = "https://gamma-api.polymarket.com"
+POLYMARKET_DATA_API  = "https://data-api.polymarket.com"
+ODDS_API             = "https://api.the-odds-api.com/v4"
+NOAA_API             = "https://api.weather.gov"
+KRAKEN_API           = "https://api.kraken.com/0/public"
 
 KRAKEN_SYMBOLS = {
     "BTC": "XXBTZUSD", "ETH": "XETHZUSD", "SOL": "SOLUSD",
@@ -137,6 +137,96 @@ def db_load_alerted():
     except Exception as e:
         print(f"DB load alerted error: {e}")
 
+def db_init_wallets():
+    if not DATABASE_URL:
+        return
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tracked_wallets (
+                        address          TEXT PRIMARY KEY,
+                        win_rate         NUMERIC(5,4)  NOT NULL,
+                        markets_resolved INTEGER       NOT NULL,
+                        total_pnl        NUMERIC(12,2),
+                        first_seen       TIMESTAMPTZ   DEFAULT NOW(),
+                        last_seen        TIMESTAMPTZ   DEFAULT NOW()
+                    );
+                    CREATE TABLE IF NOT EXISTS wallet_positions (
+                        id           SERIAL PRIMARY KEY,
+                        address      TEXT        NOT NULL,
+                        condition_id TEXT        NOT NULL,
+                        outcome      TEXT        NOT NULL,
+                        slug         TEXT,
+                        title        TEXT,
+                        avg_price    NUMERIC(6,4),
+                        size         NUMERIC(12,4),
+                        alerted_at   TIMESTAMPTZ DEFAULT NOW(),
+                        UNIQUE(address, condition_id, outcome)
+                    );
+                """)
+        print("✅ Wallet tables initialized.")
+    except Exception as e:
+        print(f"Wallet DB init error: {e}")
+
+def db_upsert_wallet(address, win_rate, markets_resolved, total_pnl):
+    if not DATABASE_URL:
+        return
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO tracked_wallets
+                        (address, win_rate, markets_resolved, total_pnl)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (address) DO UPDATE SET
+                        win_rate         = EXCLUDED.win_rate,
+                        markets_resolved = EXCLUDED.markets_resolved,
+                        total_pnl        = EXCLUDED.total_pnl,
+                        last_seen        = NOW()
+                """, (address, win_rate, markets_resolved, total_pnl))
+    except Exception as e:
+        print(f"DB upsert wallet error: {e}")
+
+def db_get_tracked_wallets():
+    if not DATABASE_URL:
+        return []
+    try:
+        with db_connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM tracked_wallets ORDER BY win_rate DESC")
+                return cur.fetchall()
+    except Exception as e:
+        print(f"DB get wallets error: {e}")
+        return []
+
+def db_log_wallet_position(address, position):
+    """Insert a new wallet position row. Returns True if it was genuinely new."""
+    if not DATABASE_URL:
+        return True  # assume new so we still alert when DB is unavailable
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO wallet_positions
+                        (address, condition_id, outcome, slug, title, avg_price, size)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (address, condition_id, outcome) DO NOTHING
+                    RETURNING id
+                """, (
+                    address,
+                    position.get("conditionId", ""),
+                    position.get("outcome", ""),
+                    position.get("slug", ""),
+                    position.get("title", "")[:200],
+                    position.get("avgPrice") or 0,
+                    position.get("size") or 0,
+                ))
+                return cur.fetchone() is not None
+    except Exception as e:
+        print(f"DB log wallet position error: {e}")
+        return False
+
 def db_update_open_signals():
     """Refresh current_price + check for resolutions on open signals."""
     if not DATABASE_URL:
@@ -245,6 +335,17 @@ def poly_link(m):
     return f"https://polymarket.com/event/{m.get('slug','')}"
 
 
+# ─── KELLY CRITERION ──────────────────────────────────────────────────────────
+def kelly_str(edge, poly_price, direction):
+    """Return a formatted Kelly sizing string for a Telegram message."""
+    denom = (1 - poly_price) if direction == "YES" else poly_price
+    if denom <= 0:
+        return ""
+    full_kelly = (edge / denom) * 100
+    half_kelly = full_kelly / 2
+    return f"🎲 <b>Kelly sizing:</b> {full_kelly:.1f}% (½ Kelly: {half_kelly:.1f}%)\n"
+
+
 # ─── CRYPTO SIGNAL ────────────────────────────────────────────────────────────
 def sigmoid(x):
     return 1 / (1 + math.exp(-max(-20, min(20, x))))
@@ -262,25 +363,6 @@ def derive_implied_prob(klines, funding_rate):
     funding_bias = float(funding_rate or 0) * 100
     raw = sigmoid(signal * 2 + funding_bias * 0.5 + momentum * 10)
     return max(0.05, min(0.95, raw))
-
-def fetch_klines_bybit(symbol):
-    try:
-        r = requests.get(f"{BYBIT_API}/kline",
-            params={"category": "spot", "symbol": f"{symbol}USDT",
-                    "interval": "1", "limit": 15},
-            timeout=10)
-        if not r.ok:
-            return None
-        data = r.json()
-        rows = data.get("result", {}).get("list", [])
-        if not rows:
-            return None
-        # Bybit returns [time, open, high, low, close, volume, turnover]
-        # Reformat to match Binance structure [0]=time [4]=close
-        return [[row[0], row[1], row[2], row[3], row[4]] for row in rows]
-    except Exception as e:
-        print(f"  Bybit {symbol} error: {e}")
-        return None
 
 def fetch_klines_kraken(symbol):
     try:
@@ -304,29 +386,12 @@ def fetch_klines_kraken(symbol):
         return None
 
 def fetch_klines(symbol):
-    data = fetch_klines_bybit(symbol)
-    if data:
-        print(f"  {symbol}: Bybit ✅")
-        return data
-    print(f"  {symbol}: Bybit failed, trying Kraken...")
     data = fetch_klines_kraken(symbol)
     if data:
         print(f"  {symbol}: Kraken ✅")
         return data
-    print(f"  {symbol}: both sources failed")
+    print(f"  {symbol}: Kraken failed")
     return None
-
-def fetch_funding(symbol):
-    try:
-        r = requests.get(f"{BYBIT_API}/funding/history",
-            params={"category": "linear", "symbol": f"{symbol}USDT", "limit": 1},
-            timeout=10)
-        if not r.ok:
-            return None
-        rows = r.json().get("result", {}).get("list", [])
-        return rows[0].get("fundingRate") if rows else None
-    except:
-        return None
 
 def fetch_polymarkets_crypto():
     try:
@@ -406,8 +471,9 @@ def run_crypto_scan(implied_probs):
             f"📋 <b>Market:</b> {question}\n"
             f"🎯 <b>Bet:</b> {direction}\n"
             f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
-            f"📈 <b>Binance implied:</b> {implied*100:.1f}¢\n"
+            f"📈 <b>Implied:</b> {implied*100:.1f}¢\n"
             f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n"
+            f"{kelly_str(abs_edge, poly_price, direction)}"
             f"💧 <b>24h volume:</b> {vol_str}\n"
             f"🔗 <a href='{poly_link(m)}'>Bet on Polymarket</a>\n\n"
             f"<i>Signal only — not financial advice.</i>"
@@ -547,6 +613,7 @@ def run_sports_scan():
                     f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
                     f"{league_emoji} <b>Vegas implied:</b> {vegas_prob*100:.1f}¢\n"
                     f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n"
+                    f"{kelly_str(abs_edge, poly_price, direction)}"
                     f"🔗 <a href='{poly_link(m)}'>Bet on Polymarket</a>\n\n"
                     f"<i>Signal only — not financial advice.</i>"
                 )
@@ -834,11 +901,165 @@ def run_weather_scan():
                 f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
                 f"{signal_label}: {implied*100:.0f}¢\n"
                 f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n"
+                f"{kelly_str(abs_edge, poly_price, direction)}"
                 f"🔗 <a href='{poly_link(m)}'>Bet on Polymarket</a>\n\n"
                 f"<i>Signal only — not financial advice.</i>"
             )
             signals += 1
     return signals
+
+
+# ─── WALLET TRACKER ───────────────────────────────────────────────────────────
+WALLET_WIN_RATE_THRESHOLD = 0.65
+WALLET_MIN_MARKETS        = 50
+WALLET_EVAL_EVERY         = 20   # cycles between evaluation batches (~10 min at 30s interval)
+WALLET_EVAL_BATCH         = 10   # addresses evaluated per batch cycle
+WALLET_MIN_POSITION_SIZE  = 10   # ignore dust positions below $10
+
+_wallet_candidates = set()   # seen in trades feed, not yet evaluated
+_wallet_evaluated  = set()   # already evaluated (good or bad)
+
+def fetch_recent_trades(limit=100):
+    try:
+        r = requests.get(f"{POLYMARKET_DATA_API}/trades",
+            params={"limit": limit}, timeout=10)
+        return r.json() if r.ok else []
+    except Exception as e:
+        print(f"  Wallet trades fetch error: {e}")
+        return []
+
+def fetch_wallet_positions(address, limit=500):
+    try:
+        r = requests.get(f"{POLYMARKET_DATA_API}/positions",
+            params={"user": address, "limit": limit, "sizeThreshold": "0"},
+            timeout=15)
+        return r.json() if r.ok else []
+    except Exception as e:
+        print(f"  Wallet positions fetch error ({address[:10]}...): {e}")
+        return []
+
+def evaluate_wallet(address):
+    """
+    Compute win rate from resolved positions.
+    Returns (win_rate, markets_resolved, total_pnl) or None if insufficient data.
+    Resolved won  = redeemable OR curPrice >= 0.95
+    Resolved lost = endDate past AND curPrice <= 0.05 AND NOT redeemable
+    """
+    positions = fetch_wallet_positions(address, limit=500)
+    if not positions:
+        return None
+
+    now = datetime.now(timezone.utc)
+    won = lost = 0
+    total_pnl = 0.0
+
+    for p in positions:
+        end_str = p.get("endDate")
+        if not end_str:
+            continue
+        try:
+            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if end_dt > now:
+            continue  # still active
+
+        cur_price  = float(p.get("curPrice") or 0)
+        redeemable = p.get("redeemable", False)
+        pnl        = float(p.get("cashPnl") or p.get("realizedPnl") or 0)
+
+        if redeemable or cur_price >= 0.95:
+            won  += 1
+            total_pnl += pnl
+        elif cur_price <= 0.05:
+            lost += 1
+            total_pnl += pnl
+
+    total = won + lost
+    if total < WALLET_MIN_MARKETS:
+        return None
+    return won / total, total, total_pnl
+
+def run_wallet_scan(cycle):
+    # ── Harvest addresses from the global trades feed ──
+    trades = fetch_recent_trades(limit=100)
+    added = 0
+    for t in trades:
+        addr = (t.get("proxyWallet") or "").lower()
+        if addr and addr not in _wallet_evaluated and addr not in _wallet_candidates:
+            _wallet_candidates.add(addr)
+            added += 1
+    if added:
+        print(f"  Wallets: +{added} new candidates (pool={len(_wallet_candidates)})")
+
+    # ── Evaluate a batch of candidates every N cycles ──
+    if cycle % WALLET_EVAL_EVERY == 0 and _wallet_candidates:
+        batch = list(_wallet_candidates)[:WALLET_EVAL_BATCH]
+        for addr in batch:
+            _wallet_candidates.discard(addr)
+            _wallet_evaluated.add(addr)
+            result = evaluate_wallet(addr)
+            if result is None:
+                continue
+            win_rate, resolved, total_pnl = result
+            if win_rate < WALLET_WIN_RATE_THRESHOLD:
+                continue
+            db_upsert_wallet(addr, win_rate, resolved, total_pnl)
+            print(f"  ⭐ Sharp wallet: {addr[:10]}... {win_rate*100:.0f}% over {resolved} markets")
+            send_telegram(
+                f"⭐ <b>SHARP WALLET DETECTED</b>\n\n"
+                f"🔑 <b>Address:</b> <code>{addr}</code>\n"
+                f"📊 <b>Win rate:</b> {win_rate*100:.0f}%\n"
+                f"🏆 <b>Resolved markets:</b> {resolved}\n"
+                f"💰 <b>Total PnL:</b> ${total_pnl:+,.0f}\n"
+                f"🔗 <a href='https://polymarket.com/profile/{addr}'>View profile</a>"
+            )
+
+    # ── Monitor tracked wallets for new open positions ──
+    tracked = db_get_tracked_wallets()
+    if not tracked:
+        return
+
+    now = datetime.now(timezone.utc)
+    for wallet in tracked:
+        addr     = wallet["address"]
+        win_rate = float(wallet["win_rate"])
+        positions = fetch_wallet_positions(addr, limit=50)
+
+        for p in positions:
+            size = float(p.get("size") or 0)
+            if size < WALLET_MIN_POSITION_SIZE:
+                continue
+
+            # Skip expired markets
+            end_str = p.get("endDate")
+            if end_str:
+                try:
+                    if datetime.fromisoformat(end_str.replace("Z", "+00:00")) < now:
+                        continue
+                except Exception:
+                    pass
+
+            if not db_log_wallet_position(addr, p):
+                continue  # already alerted
+
+            avg_price = float(p.get("avgPrice") or 0)
+            title     = (p.get("title") or "")[:80]
+            outcome   = p.get("outcome", "")
+            slug      = p.get("slug", "")
+
+            print(f"  👁 WALLET SIGNAL — {addr[:10]}... | {outcome} | {title[:40]}")
+            send_telegram(
+                f"👁 <b>SHARP WALLET SIGNAL</b>\n\n"
+                f"🔑 <b>Wallet:</b> <code>{addr[:10]}...{addr[-4:]}</code> "
+                f"({win_rate*100:.0f}% win rate)\n"
+                f"📋 <b>Market:</b> {title}\n"
+                f"🎯 <b>Bet:</b> {outcome}\n"
+                f"📊 <b>Avg price:</b> {avg_price*100:.1f}¢\n"
+                f"💰 <b>Position size:</b> ${size:,.0f}\n"
+                f"🔗 <a href='https://polymarket.com/event/{slug}'>View market</a>\n\n"
+                f"<i>Signal only — not financial advice.</i>"
+            )
 
 
 # ─── MAIN LOOP ────────────────────────────────────────────────────────────────
@@ -850,7 +1071,7 @@ def run_scan(cycle):
 
     implied = {}
     for sym in CRYPTO_PAIRS:
-        p = derive_implied_prob(fetch_klines(sym), fetch_funding(sym))
+        p = derive_implied_prob(fetch_klines(sym), None)
         if p:
             implied[sym] = p
     print(f"  Crypto implied: {implied}")
@@ -862,6 +1083,7 @@ def run_scan(cycle):
     cs = run_crypto_scan(implied)
     ss = run_sports_scan()
     ws = run_weather_scan()
+    run_wallet_scan(cycle)
 
     print(f"  Odds API requests this cycle: {_odds_request_count[0]}")
     if cs+ss+ws == 0:
@@ -883,6 +1105,7 @@ if __name__ == "__main__":
     print("=" * 50)
 
     db_init()
+    db_init_wallets()
     db_load_alerted()
 
     send_telegram(
