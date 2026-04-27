@@ -670,7 +670,7 @@ def _noaa_points(lat, lon):
     try:
         pts = requests.get(
             f"{NOAA_API}/points/{lat},{lon}",
-            headers={"User-Agent": "PolySignalBot/1.0"}, timeout=10)
+            headers={"User-Agent": "DUB/1.0"}, timeout=10)
         if not pts.ok:
             print(f"  NOAA /points {lat},{lon} failed: {pts.status_code}")
             return False
@@ -697,7 +697,7 @@ def fetch_noaa_forecast(lat, lon):
             return None
         r = requests.get(
             f"{NOAA_API}/gridpoints/{office}/{grid_x},{grid_y}/forecast",
-            headers={"User-Agent": "PolySignalBot/1.0"}, timeout=10)
+            headers={"User-Agent": "DUB/1.0"}, timeout=10)
         if not r.ok:
             print(f"  NOAA forecast {office}/{grid_x},{grid_y} failed: {r.status_code}")
             return None
@@ -718,7 +718,7 @@ def fetch_noaa_current_temp(lat, lon):
 
         if stations_url not in _noaa_station_cache:
             sr = requests.get(stations_url,
-                              headers={"User-Agent": "PolySignalBot/1.0"}, timeout=10)
+                              headers={"User-Agent": "DUB/1.0"}, timeout=10)
             if not sr.ok:
                 return None
             features = sr.json().get("features", [])
@@ -733,7 +733,7 @@ def fetch_noaa_current_temp(lat, lon):
 
         obs = requests.get(
             f"{NOAA_API}/stations/{station_id}/observations/latest",
-            headers={"User-Agent": "PolySignalBot/1.0"}, timeout=10)
+            headers={"User-Agent": "DUB/1.0"}, timeout=10)
         if not obs.ok:
             return None
         temp_c = obs.json().get("properties", {}).get("temperature", {}).get("value")
@@ -1122,7 +1122,7 @@ def run_scan(cycle):
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("  POLY SIGNAL ENGINE")
+    print("  DUB TRADING BOT")
     print(f"  Threshold: {EDGE_THRESHOLD*100:.0f}%  |  Interval: {POLL_INTERVAL}s")
     print(f"  DB: {'✅' if DATABASE_URL else '❌'}")
     print("=" * 50)
@@ -1132,7 +1132,7 @@ if __name__ == "__main__":
     db_load_alerted()
 
     send_telegram(
-        f"⚡ <b>Poly Signal Engine started</b>\n\n"
+        f"⚡ <b>DUB Trading Bot started</b>\n\n"
         f"Version: {BOT_VERSION}\n"
         f"Scanning every {POLL_INTERVAL}s\n"
         f"Edge threshold: {EDGE_THRESHOLD*100:.0f}%\n"
