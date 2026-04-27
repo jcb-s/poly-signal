@@ -303,14 +303,18 @@ def db_update_open_signals():
         print(f"DB update error: {e}")
 
 def fetch_market_by_slug(slug):
+    """Fetch a market by slug, falling back to closed=true for resolved markets."""
     try:
-        r = requests.get(f"{GAMMA_API}/markets",
-            params={"slug": slug, "limit": 1}, timeout=10)
-        if not r.ok:
-            return None
-        data = r.json()
-        markets = data.get("markets", data) if isinstance(data, dict) else data
-        return markets[0] if markets else None
+        for extra in [{}, {"closed": "true"}]:
+            r = requests.get(f"{GAMMA_API}/markets",
+                params={"slug": slug, "limit": 1, **extra}, timeout=10)
+            if not r.ok:
+                return None
+            data = r.json()
+            markets = data.get("markets", data) if isinstance(data, dict) else data
+            if markets:
+                return markets[0]
+        return None
     except:
         return None
 
@@ -1066,7 +1070,7 @@ def run_wallet_scan(cycle):
 RESOLUTION_CHECK_EVERY = 10  # cycles (every 5 min at 30s interval)
 
 def run_scan(cycle):
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Scanning... (cycle #{cycle})")
+    print(f"\n[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Scanning... (cycle #{cycle})")
     _odds_request_count[0] = 0
 
     implied = {}
