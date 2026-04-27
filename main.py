@@ -472,8 +472,7 @@ def run_sports_scan():
             # Always stamp the time so an empty/failed response doesn't trigger
             # a live fetch on every cycle — retry after TTL like everything else.
             vegas_cache_time[league] = now
-            if fresh:
-                vegas_cache[league] = fresh
+            vegas_cache[league] = fresh  # always write, even [] so cache hit fires next cycle
             print(f"  Odds API [{league}]: fetched {len(fresh)} games")
         else:
             age = int(now - vegas_cache_time[league])
