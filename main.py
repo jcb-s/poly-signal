@@ -1086,14 +1086,17 @@ def run_scan(cycle):
     _odds_request_count[0] = 0
 
     implied = {}
-    for sym in CRYPTO_PAIRS:
-        p = derive_implied_prob(fetch_klines(sym), None)
-        if p:
-            implied[sym] = p
-    print(f"  Crypto implied: {implied}")
-    print(f"  Crypto markets found: {len(fetch_polymarkets_crypto())}")
-    print(f"  Sports markets found: {len(fetch_polymarkets_sports())}")
-    print(f"  Weather markets found: {len(fetch_polymarkets_weather())}")
+    if ENABLE_CRYPTO_SIGNALS:
+        for sym in CRYPTO_PAIRS:
+            p = derive_implied_prob(fetch_klines(sym), None)
+            if p:
+                implied[sym] = p
+        print(f"  Crypto implied: {implied}")
+        print(f"  Crypto markets found: {len(fetch_polymarkets_crypto())}")
+    if ENABLE_SPORTS_SIGNALS:
+        print(f"  Sports markets found: {len(fetch_polymarkets_sports())}")
+    if ENABLE_WEATHER_SIGNALS:
+        print(f"  Weather markets found: {len(fetch_polymarkets_weather())}")
     print(f"  Vegas odds cached: {sum(len(v) for v in vegas_cache.values())} games across {len(vegas_cache)} leagues")
 
     cs = run_crypto_scan(implied) if ENABLE_CRYPTO_SIGNALS else 0
@@ -1128,9 +1131,9 @@ if __name__ == "__main__":
         f"⚡ <b>Poly Signal Engine started</b>\n\n"
         f"Scanning every {POLL_INTERVAL}s\n"
         f"Edge threshold: {EDGE_THRESHOLD*100:.0f}%\n"
-        f"Crypto: ✅ ({', '.join(CRYPTO_PAIRS)})\n"
-        f"Sports: {'✅' if ODDS_API_KEYS else '❌'} ({len(SPORTS_LEAGUES)} leagues, {len(ODDS_API_KEYS)} key(s))\n"
-        f"Weather: ✅\n"
+        f"Crypto: {'✅' if ENABLE_CRYPTO_SIGNALS else '⏸'} ({', '.join(CRYPTO_PAIRS)})\n"
+        f"Sports: {'✅' if ENABLE_SPORTS_SIGNALS and ODDS_API_KEYS else ('⏸' if not ENABLE_SPORTS_SIGNALS else '❌')} ({len(SPORTS_LEAGUES)} leagues, {len(ODDS_API_KEYS)} key(s))\n"
+        f"Weather: {'✅' if ENABLE_WEATHER_SIGNALS else '⏸'}\n"
         f"Logging: {'✅ Postgres' if DATABASE_URL else '❌'}"
     )
 
