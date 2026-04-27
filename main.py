@@ -103,12 +103,13 @@ def db_init():
                     CREATE INDEX IF NOT EXISTS idx_signals_slug
                         ON signals(market_slug);
                     ALTER TABLE signals ADD COLUMN IF NOT EXISTS bot_version TEXT DEFAULT '1.0.0';
+                    ALTER TABLE signals ADD COLUMN IF NOT EXISTS confidence INTEGER DEFAULT 1;
                 """)
         print("✅ Database initialized.")
     except Exception as e:
         print(f"DB init error: {e}")
 
-def db_log_signal(signal_type, market, direction, entry_price, implied_price, edge):
+def db_log_signal(signal_type, market, direction, entry_price, implied_price, edge, confidence=1):
     """Insert a new signal row."""
     if not DATABASE_URL:
         return
@@ -121,8 +122,8 @@ def db_log_signal(signal_type, market, direction, entry_price, implied_price, ed
                     INSERT INTO signals
                     (signal_type, market_question, market_slug, event_slug,
                      condition_id, direction, entry_price, implied_price, edge,
-                     bot_version)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     bot_version, confidence)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     signal_type,
                     market.get("question", ""),
@@ -134,6 +135,7 @@ def db_log_signal(signal_type, market, direction, entry_price, implied_price, ed
                     implied_price,
                     edge,
                     BOT_VERSION,
+                    confidence,
                 ))
     except Exception as e:
         print(f"DB log error: {e}")
@@ -913,16 +915,32 @@ def run_weather_scan():
 
             direction = "YES" if edge > 0 else "NO"
 
-            # Skip YES signals where the market is already nearly worthless
-            if direction == "YES" and poly_price < 0.05:
+            # Weather signals are NO-only
+            if direction == "YES":
+                if poly_price < 0.05:
+                    print(f"    Skip YES (poly_price={poly_price:.2f} < 0.05): {question[:50]!r}")
+                print(f"    Skip YES (weather NO-only): {question[:50]!r}")
+                continue
+
+            # Confidence score based on edge magnitude
+            if abs_edge > 0.15:
+                confidence = 3
+            elif abs_edge >= 0.08:
+                confidence = 2
+            else:
+                confidence = 1
+
+            if confidence < 2:
+                print(f"    Skip (confidence {confidence}, edge {abs_edge*100:.1f}%): {question[:50]!r}")
                 continue
 
             alerted.add(key)
 
-            db_log_signal("weather", m, direction, poly_price, implied, abs_edge)
+            db_log_signal("weather", m, direction, poly_price, implied, abs_edge, confidence)
 
+            conf_label = {1: "Low", 2: "Medium", 3: "High"}[confidence]
             emoji = "🟢" if direction == "YES" else "🔴"
-            print(f"  ⚡ WEATHER — {question[:50]} | {direction} | +{abs_edge*100:.1f}%")
+            print(f"  ⚡ WEATHER — {question[:50]} | {direction} | +{abs_edge*100:.1f}% | conf={confidence}")
             send_telegram(
                 f"{emoji} <b>WEATHER SIGNAL</b>\n\n"
                 f"📋 <b>Market:</b> {question}\n"
@@ -930,6 +948,7 @@ def run_weather_scan():
                 f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
                 f"{signal_label}: {implied*100:.0f}¢\n"
                 f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n"
+                f"🎯 <b>Confidence:</b> {conf_label} ({confidence}/3)\n"
                 f"{kelly_str(abs_edge, poly_price, direction)}"
                 f"🔗 <a href='{poly_link(m)}'>Bet on Polymarket</a>\n\n"
                 f"<i>Signal only — not financial advice.</i>"
