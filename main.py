@@ -13,7 +13,8 @@ TG_TOKEN       = os.environ.get("TG_TOKEN")
 TG_CHAT_ID     = os.environ.get("TG_CHAT_ID")
 _raw_odds_keys = os.environ.get("ODDS_API_KEYS") or os.environ.get("ODDS_API_KEY", "")
 ODDS_API_KEYS  = [k.strip() for k in _raw_odds_keys.split(",") if k.strip()]
-_odds_key_idx  = [0]  # mutable so fetch_vegas_odds_for_league can rotate without global
+_odds_key_idx      = [0]   # mutable so fetch_vegas_odds_for_league can rotate without global
+_odds_request_count = [0]  # incremented on every live HTTP request to the Odds API
 DATABASE_URL   = os.environ.get("DATABASE_URL")
 EDGE_THRESHOLD = 0.04
 POLL_INTERVAL  = 30
@@ -426,6 +427,7 @@ def fetch_vegas_odds_for_league(league):
     for attempt in range(n):
         key = ODDS_API_KEYS[_odds_key_idx[0]]
         try:
+            _odds_request_count[0] += 1
             r = requests.get(f"{ODDS_API}/sports/{league}/odds",
                 params={"apiKey": key, "regions": "us",
                         "markets": "h2h", "oddsFormat": "american"},
@@ -844,6 +846,7 @@ RESOLUTION_CHECK_EVERY = 10  # cycles (every 5 min at 30s interval)
 
 def run_scan(cycle):
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Scanning... (cycle #{cycle})")
+    _odds_request_count[0] = 0
 
     implied = {}
     for sym in CRYPTO_PAIRS:
@@ -854,12 +857,13 @@ def run_scan(cycle):
     print(f"  Crypto markets found: {len(fetch_polymarkets_crypto())}")
     print(f"  Sports markets found: {len(fetch_polymarkets_sports())}")
     print(f"  Weather markets found: {len(fetch_polymarkets_weather())}")
-    print(f"  Vegas odds (NBA): {len(fetch_vegas_odds_for_league('basketball_nba'))}")
+    print(f"  Vegas odds cached: {sum(len(v) for v in vegas_cache.values())} games across {len(vegas_cache)} leagues")
 
     cs = run_crypto_scan(implied)
     ss = run_sports_scan()
     ws = run_weather_scan()
 
+    print(f"  Odds API requests this cycle: {_odds_request_count[0]}")
     if cs+ss+ws == 0:
         print("  No signals this cycle.")
 
