@@ -18,6 +18,9 @@ _odds_request_count = [0]  # incremented on every live HTTP request to the Odds 
 DATABASE_URL   = os.environ.get("DATABASE_URL")
 EDGE_THRESHOLD = 0.04
 POLL_INTERVAL  = 30
+ENABLE_CRYPTO_SIGNALS  = False
+ENABLE_SPORTS_SIGNALS  = False
+ENABLE_WEATHER_SIGNALS = True
 # ──────────────────────────────────────────────────────────────────────────────
 
 GAMMA_API            = "https://gamma-api.polymarket.com"
@@ -273,7 +276,9 @@ def db_update_open_signals():
                 if sig["direction"] == "YES":
                     pnl_pct = ((current_price - entry) / entry) * 100
                 else:
-                    pnl_pct = ((entry - current_price) / entry) * 100
+                    no_entry   = 1 - entry
+                    no_current = 1 - current_price
+                    pnl_pct = ((no_current - no_entry) / no_entry) * 100 if no_entry > 0 else 0
 
                 # Check if market is resolved
                 is_closed = fresh.get("closed") or False
@@ -903,6 +908,11 @@ def run_weather_scan():
                 continue
 
             direction = "YES" if edge > 0 else "NO"
+
+            # Skip YES signals where the market is already nearly worthless
+            if direction == "YES" and poly_price < 0.05:
+                continue
+
             alerted.add(key)
 
             db_log_signal("weather", m, direction, poly_price, implied, abs_edge)
@@ -925,8 +935,8 @@ def run_weather_scan():
 
 
 # ─── WALLET TRACKER ───────────────────────────────────────────────────────────
-WALLET_WIN_RATE_THRESHOLD = 0.65
-WALLET_MIN_MARKETS        = 50
+WALLET_WIN_RATE_THRESHOLD = 0.70
+WALLET_MIN_MARKETS        = 100
 WALLET_EVAL_EVERY         = 20   # cycles between evaluation batches (~10 min at 30s interval)
 WALLET_EVAL_BATCH         = 10   # addresses evaluated per batch cycle
 WALLET_MIN_POSITION_SIZE  = 10   # ignore dust positions below $10
@@ -957,8 +967,8 @@ def evaluate_wallet(address):
     """
     Compute win rate from resolved positions.
     Returns (win_rate, markets_resolved, total_pnl) or None if insufficient data.
-    Resolved won  = redeemable OR curPrice >= 0.95
-    Resolved lost = endDate past AND curPrice <= 0.05 AND NOT redeemable
+    Resolved won  = redeemable AND curPrice >= 0.98
+    Resolved lost = curPrice <= 0.02 AND endDate past
     """
     positions = fetch_wallet_positions(address, limit=500)
     if not positions:
@@ -969,25 +979,19 @@ def evaluate_wallet(address):
     total_pnl = 0.0
 
     for p in positions:
-        end_str = p.get("endDate")
-        if not end_str:
-            continue
-        end_dt = parse_aware_dt(end_str)
-        if end_dt is None:
-            continue
-        if end_dt > now:
-            continue  # still active
-
         cur_price  = float(p.get("curPrice") or 0)
         redeemable = p.get("redeemable", False)
         pnl        = float(p.get("cashPnl") or p.get("realizedPnl") or 0)
 
-        if redeemable or cur_price >= 0.95:
-            won  += 1
+        if redeemable and cur_price >= 0.98:
+            won += 1
             total_pnl += pnl
-        elif cur_price <= 0.05:
-            lost += 1
-            total_pnl += pnl
+        elif cur_price <= 0.02:
+            end_str = p.get("endDate")
+            end_dt = parse_aware_dt(end_str)
+            if end_dt is not None and end_dt < now:
+                lost += 1
+                total_pnl += pnl
 
     total = won + lost
     if total < WALLET_MIN_MARKETS:
@@ -1092,9 +1096,9 @@ def run_scan(cycle):
     print(f"  Weather markets found: {len(fetch_polymarkets_weather())}")
     print(f"  Vegas odds cached: {sum(len(v) for v in vegas_cache.values())} games across {len(vegas_cache)} leagues")
 
-    cs = run_crypto_scan(implied)
-    ss = run_sports_scan()
-    ws = run_weather_scan()
+    cs = run_crypto_scan(implied) if ENABLE_CRYPTO_SIGNALS else 0
+    ss = run_sports_scan()       if ENABLE_SPORTS_SIGNALS else 0
+    ws = run_weather_scan()      if ENABLE_WEATHER_SIGNALS else 0
     run_wallet_scan(cycle)
 
     print(f"  Odds API requests this cycle: {_odds_request_count[0]}")
