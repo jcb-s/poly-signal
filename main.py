@@ -39,14 +39,25 @@ CRYPTO_PAIRS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 
 alerted = set()
 
+def parse_aware_dt(s):
+    """Parse any ISO date/datetime string and always return a timezone-aware datetime.
+    Handles date-only strings (e.g. '2026-04-26') that have no Z to replace."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
 def is_market_expired(market):
     end = market.get("endDate") or market.get("endDateIso")
-    if not end:
+    dt = parse_aware_dt(end)
+    if dt is None:
         return False
-    try:
-        return datetime.fromisoformat(end.replace("Z", "+00:00")) < datetime.now(timezone.utc)
-    except Exception:
-        return False
+    return dt < datetime.now(timezone.utc)
 
 vegas_cache = {}
 vegas_cache_time = {}
@@ -961,9 +972,8 @@ def evaluate_wallet(address):
         end_str = p.get("endDate")
         if not end_str:
             continue
-        try:
-            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-        except Exception:
+        end_dt = parse_aware_dt(end_str)
+        if end_dt is None:
             continue
         if end_dt > now:
             continue  # still active
@@ -1038,11 +1048,9 @@ def run_wallet_scan(cycle):
             # Skip expired markets
             end_str = p.get("endDate")
             if end_str:
-                try:
-                    if datetime.fromisoformat(end_str.replace("Z", "+00:00")) < now:
-                        continue
-                except Exception:
-                    pass
+                end_dt = parse_aware_dt(end_str)
+                if end_dt is not None and end_dt < now:
+                    continue
 
             if not db_log_wallet_position(addr, p):
                 continue  # already alerted
