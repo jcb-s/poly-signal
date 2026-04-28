@@ -866,18 +866,32 @@ def implied_prob_for_temp_market(question, forecast_temp_f):
     return None
 
 def fetch_polymarkets_weather():
+    words = [
+        "high", "low", "temperature", "rain", "snow", "storm", "weather",
+        "degrees", "fahrenheit", "celsius", "precipitation", "humid",
+        "wind", "forecast", "warmest", "coldest", "hottest",
+    ]
+    markets = []
+    offset = 0
+    batch = 100
+    max_collect = 500
     try:
-        r = requests.get(f"{GAMMA_API}/markets",
-            params={"active":"true","limit":100,"order":"volume",
-                    "ascending":"false"}, timeout=10)
-        if not r.ok:
-            return []
-        data = r.json()
-        markets = data.get("markets", data) if isinstance(data, dict) else data
-        words = ["rain","temperature","snow","storm","weather",
-                 "degrees","fahrenheit","celsius","precipitation"]
+        while len(markets) < max_collect:
+            r = requests.get(f"{GAMMA_API}/markets",
+                params={"active": "true", "limit": batch, "offset": offset,
+                        "order": "volume", "ascending": "false"}, timeout=10)
+            if not r.ok:
+                break
+            data = r.json()
+            page = data.get("markets", data) if isinstance(data, dict) else data
+            if not page:
+                break
+            markets.extend(page)
+            if len(page) < batch:
+                break
+            offset += batch
         return [m for m in markets if m.get("question") and
-                any(w in m.get("question","").lower() for w in words)]
+                any(w in m.get("question", "").lower() for w in words)]
     except:
         return []
 
