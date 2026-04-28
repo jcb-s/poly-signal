@@ -22,13 +22,6 @@ BOT_VERSION    = os.environ.get("BOT_VERSION", "2.0.0")
 ENABLE_CRYPTO_SIGNALS  = False
 ENABLE_SPORTS_SIGNALS  = False
 ENABLE_WEATHER_SIGNALS = True
-ENABLE_COPYTRADE       = True
-
-FALCON_API_KEY   = os.environ.get("FALCON_API_KEY", "")
-FALCON_API_URL   = "https://narrative.agent.heisenberg.so/api/v2/semantic/retrieve/parameterized"
-COPYTRADE_MIN_WIN_RATE  = 0.70
-COPYTRADE_MIN_MARKETS   = 50
-COPYTRADE_REFRESH_EVERY = 720  # cycles (~6h at 30s)
 
 _raw_curated    = os.environ.get("CURATED_WALLETS", "")
 CURATED_WALLETS = [w.strip().lower() for w in _raw_curated.split(",") if w.strip()]
@@ -987,23 +980,7 @@ def run_weather_scan():
 
 
 # ─── WALLET TRACKER ───────────────────────────────────────────────────────────
-WALLET_WIN_RATE_THRESHOLD = 0.70
-WALLET_MIN_MARKETS        = 100
-WALLET_EVAL_EVERY         = 20   # cycles between evaluation batches (~10 min at 30s interval)
-WALLET_EVAL_BATCH         = 10   # addresses evaluated per batch cycle
-WALLET_MIN_POSITION_SIZE  = 10   # ignore dust positions below $10
-
-_wallet_candidates = set()   # seen in trades feed, not yet evaluated
-_wallet_evaluated  = set()   # already evaluated (good or bad)
-
-def fetch_recent_trades(limit=100):
-    try:
-        r = requests.get(f"{POLYMARKET_DATA_API}/trades",
-            params={"limit": limit}, timeout=10)
-        return r.json() if r.ok else []
-    except Exception as e:
-        print(f"  Wallet trades fetch error: {e}")
-        return []
+WALLET_MIN_POSITION_SIZE = 10   # ignore dust positions below $10
 
 def fetch_wallet_positions(address, limit=500):
     try:
@@ -1015,76 +992,7 @@ def fetch_wallet_positions(address, limit=500):
         print(f"  Wallet positions fetch error ({address[:10]}...): {e}")
         return []
 
-def evaluate_wallet(address):
-    """
-    Compute win rate from resolved positions.
-    Returns (win_rate, markets_resolved, total_pnl) or None if insufficient data.
-    Resolved won  = redeemable AND curPrice >= 0.98
-    Resolved lost = curPrice <= 0.02 AND endDate past
-    """
-    positions = fetch_wallet_positions(address, limit=500)
-    if not positions:
-        return None
-
-    now = datetime.now(timezone.utc)
-    won = lost = 0
-    total_pnl = 0.0
-
-    for p in positions:
-        cur_price  = float(p.get("curPrice") or 0)
-        redeemable = p.get("redeemable", False)
-        pnl        = float(p.get("cashPnl") or p.get("realizedPnl") or 0)
-
-        if redeemable and cur_price >= 0.98:
-            won += 1
-            total_pnl += pnl
-        elif cur_price <= 0.02:
-            end_str = p.get("endDate")
-            end_dt = parse_aware_dt(end_str)
-            if end_dt is not None and end_dt < now:
-                lost += 1
-                total_pnl += pnl
-
-    total = won + lost
-    if total < WALLET_MIN_MARKETS:
-        return None
-    return won / total, total, total_pnl
-
-def run_wallet_scan(cycle):
-    # ── Harvest addresses from the global trades feed ──
-    trades = fetch_recent_trades(limit=100)
-    added = 0
-    for t in trades:
-        addr = (t.get("proxyWallet") or "").lower()
-        if addr and addr not in _wallet_evaluated and addr not in _wallet_candidates:
-            _wallet_candidates.add(addr)
-            added += 1
-    if added:
-        print(f"  Wallets: +{added} new candidates (pool={len(_wallet_candidates)})")
-
-    # ── Evaluate a batch of candidates every N cycles ──
-    if cycle % WALLET_EVAL_EVERY == 0 and _wallet_candidates:
-        batch = list(_wallet_candidates)[:WALLET_EVAL_BATCH]
-        for addr in batch:
-            _wallet_candidates.discard(addr)
-            _wallet_evaluated.add(addr)
-            result = evaluate_wallet(addr)
-            if result is None:
-                continue
-            win_rate, resolved, total_pnl = result
-            if win_rate < WALLET_WIN_RATE_THRESHOLD:
-                continue
-            db_upsert_wallet(addr, win_rate, resolved, total_pnl)
-            print(f"  ⭐ Sharp wallet: {addr[:10]}... {win_rate*100:.0f}% over {resolved} markets")
-            send_telegram(
-                f"⭐ <b>SHARP WALLET DETECTED</b>\n\n"
-                f"🔑 <b>Address:</b> <code>{addr}</code>\n"
-                f"📊 <b>Win rate:</b> {win_rate*100:.0f}%\n"
-                f"🏆 <b>Resolved markets:</b> {resolved}\n"
-                f"💰 <b>Total PnL:</b> ${total_pnl:+,.0f}\n"
-                f"🔗 <a href='https://polymarket.com/profile/{addr}'>View profile</a>"
-            )
-
+def run_wallet_scan():
     # ── Monitor tracked wallets for new open positions ──
     tracked = db_get_tracked_wallets()
     if not tracked:
@@ -1135,57 +1043,6 @@ def run_wallet_scan(cycle):
             )
 
 
-# ─── COPYTRADE ENGINE ─────────────────────────────────────────────────────────
-def fetch_falcon_top_traders():
-    if not FALCON_API_KEY:
-        print("  Copytrade: no FALCON_API_KEY set, skipping.")
-        return []
-    try:
-        r = requests.post(
-            FALCON_API_URL,
-            headers={"Authorization": f"Bearer {FALCON_API_KEY}",
-                     "Content-Type": "application/json"},
-            json={
-                "agent_id": 579,
-                "params": {
-                    "wallet_address": "ALL",
-                    "leaderboard_period": "30d",
-                    "min_win_rate": str(COPYTRADE_MIN_WIN_RATE),
-                    "min_markets_traded": str(COPYTRADE_MIN_MARKETS),
-                },
-                "pagination": {"limit": 100, "offset": 0},
-                "formatter_config": {"format_type": "raw"},
-            },
-            timeout=20,
-        )
-        if not r.ok:
-            print(f"  Copytrade: Falcon API error {r.status_code}")
-            return []
-        return r.json().get("data", {}).get("results", [])
-    except Exception as e:
-        print(f"  Copytrade: fetch error: {e}")
-        return []
-
-def run_copytrade_refresh(cycle):
-    if cycle != 1 and cycle % COPYTRADE_REFRESH_EVERY != 0:
-        return
-    print("  Copytrade: refreshing wallet pool from Falcon...")
-    traders = fetch_falcon_top_traders()
-    added = 0
-    for t in traders:
-        win_rate       = float(t.get("win_rate") or 0)
-        markets_traded = int(t.get("markets_traded") or 0)
-        if win_rate < COPYTRADE_MIN_WIN_RATE or markets_traded < COPYTRADE_MIN_MARKETS:
-            continue
-        address   = (t.get("address") or "").lower()
-        total_pnl = float(t.get("total_pnl") or 0)
-        if not address:
-            continue
-        db_upsert_wallet(address, win_rate, markets_traded, total_pnl)
-        added += 1
-    print(f"  Copytrade: upserted {added} wallets from Falcon (pool total refreshed).")
-
-
 # ─── MAIN LOOP ────────────────────────────────────────────────────────────────
 RESOLUTION_CHECK_EVERY = 10  # cycles (every 5 min at 30s interval)
 
@@ -1207,12 +1064,10 @@ def run_scan(cycle):
         print(f"  Weather markets found: {len(fetch_polymarkets_weather())}")
     print(f"  Vegas odds cached: {sum(len(v) for v in vegas_cache.values())} games across {len(vegas_cache)} leagues")
 
-    if ENABLE_COPYTRADE:
-        run_copytrade_refresh(cycle)
     cs = run_crypto_scan(implied) if ENABLE_CRYPTO_SIGNALS else 0
     ss = run_sports_scan()       if ENABLE_SPORTS_SIGNALS else 0
     ws = run_weather_scan()      if ENABLE_WEATHER_SIGNALS else 0
-    run_wallet_scan(cycle)
+    run_wallet_scan()
 
     print(f"  Odds API requests this cycle: {_odds_request_count[0]}")
     if cs+ss+ws == 0:
@@ -1250,7 +1105,7 @@ if __name__ == "__main__":
         f"Crypto: {'✅' if ENABLE_CRYPTO_SIGNALS else '⏸'} ({', '.join(CRYPTO_PAIRS)})\n"
         f"Sports: {'✅' if ENABLE_SPORTS_SIGNALS and ODDS_API_KEYS else ('⏸' if not ENABLE_SPORTS_SIGNALS else '❌')} ({len(SPORTS_LEAGUES)} leagues, {len(ODDS_API_KEYS)} key(s))\n"
         f"Weather: {'✅' if ENABLE_WEATHER_SIGNALS else '⏸'}\n"
-        f"Copytrade: {'✅' if ENABLE_COPYTRADE else '⏸ disabled'}\n"
+        f"Wallets: {len(CURATED_WALLETS)} curated\n"
         f"Logging: {'✅ Postgres' if DATABASE_URL else '❌'}"
     )
 
