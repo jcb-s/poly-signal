@@ -22,6 +22,16 @@ BOT_VERSION    = os.environ.get("BOT_VERSION", "2.0.0")
 ENABLE_CRYPTO_SIGNALS  = False
 ENABLE_SPORTS_SIGNALS  = False
 ENABLE_WEATHER_SIGNALS = True
+ENABLE_COPYTRADE       = True
+
+FALCON_API_KEY   = os.environ.get("FALCON_API_KEY", "")
+FALCON_API_URL   = "https://narrative.agent.heisenberg.so/api/v2/semantic/retrieve/parameterized"
+COPYTRADE_MIN_WIN_RATE  = 0.70
+COPYTRADE_MIN_MARKETS   = 50
+COPYTRADE_REFRESH_EVERY = 720  # cycles (~6h at 30s)
+
+_raw_curated    = os.environ.get("CURATED_WALLETS", "")
+CURATED_WALLETS = [w.strip().lower() for w in _raw_curated.split(",") if w.strip()]
 # ──────────────────────────────────────────────────────────────────────────────
 
 GAMMA_API            = "https://gamma-api.polymarket.com"
@@ -184,12 +194,13 @@ def db_init_wallets():
                         alerted_at   TIMESTAMPTZ DEFAULT NOW(),
                         UNIQUE(address, condition_id, outcome)
                     );
+                    ALTER TABLE tracked_wallets ADD COLUMN IF NOT EXISTS curated BOOLEAN DEFAULT FALSE;
                 """)
         print("✅ Wallet tables initialized.")
     except Exception as e:
         print(f"Wallet DB init error: {e}")
 
-def db_upsert_wallet(address, win_rate, markets_resolved, total_pnl):
+def db_upsert_wallet(address, win_rate, markets_resolved, total_pnl, curated=False):
     if not DATABASE_URL:
         return
     try:
@@ -197,14 +208,15 @@ def db_upsert_wallet(address, win_rate, markets_resolved, total_pnl):
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO tracked_wallets
-                        (address, win_rate, markets_resolved, total_pnl)
-                    VALUES (%s, %s, %s, %s)
+                        (address, win_rate, markets_resolved, total_pnl, curated)
+                    VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT (address) DO UPDATE SET
                         win_rate         = EXCLUDED.win_rate,
                         markets_resolved = EXCLUDED.markets_resolved,
                         total_pnl        = EXCLUDED.total_pnl,
+                        curated          = EXCLUDED.curated,
                         last_seen        = NOW()
-                """, (address, win_rate, markets_resolved, total_pnl))
+                """, (address, win_rate, markets_resolved, total_pnl, curated))
     except Exception as e:
         print(f"DB upsert wallet error: {e}")
 
@@ -1101,6 +1113,57 @@ def run_wallet_scan(cycle):
             )
 
 
+# ─── COPYTRADE ENGINE ─────────────────────────────────────────────────────────
+def fetch_falcon_top_traders():
+    if not FALCON_API_KEY:
+        print("  Copytrade: no FALCON_API_KEY set, skipping.")
+        return []
+    try:
+        r = requests.post(
+            FALCON_API_URL,
+            headers={"Authorization": f"Bearer {FALCON_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={
+                "agent_id": 579,
+                "params": {
+                    "wallet_address": "ALL",
+                    "leaderboard_period": "30d",
+                    "min_win_rate": str(COPYTRADE_MIN_WIN_RATE),
+                    "min_markets_traded": str(COPYTRADE_MIN_MARKETS),
+                },
+                "pagination": {"limit": 100, "offset": 0},
+                "formatter_config": {"format_type": "raw"},
+            },
+            timeout=20,
+        )
+        if not r.ok:
+            print(f"  Copytrade: Falcon API error {r.status_code}")
+            return []
+        return r.json().get("data", {}).get("results", [])
+    except Exception as e:
+        print(f"  Copytrade: fetch error: {e}")
+        return []
+
+def run_copytrade_refresh(cycle):
+    if cycle != 1 and cycle % COPYTRADE_REFRESH_EVERY != 0:
+        return
+    print("  Copytrade: refreshing wallet pool from Falcon...")
+    traders = fetch_falcon_top_traders()
+    added = 0
+    for t in traders:
+        win_rate       = float(t.get("win_rate") or 0)
+        markets_traded = int(t.get("markets_traded") or 0)
+        if win_rate < COPYTRADE_MIN_WIN_RATE or markets_traded < COPYTRADE_MIN_MARKETS:
+            continue
+        address   = (t.get("address") or "").lower()
+        total_pnl = float(t.get("total_pnl") or 0)
+        if not address:
+            continue
+        db_upsert_wallet(address, win_rate, markets_traded, total_pnl)
+        added += 1
+    print(f"  Copytrade: upserted {added} wallets from Falcon (pool total refreshed).")
+
+
 # ─── MAIN LOOP ────────────────────────────────────────────────────────────────
 RESOLUTION_CHECK_EVERY = 10  # cycles (every 5 min at 30s interval)
 
@@ -1122,6 +1185,8 @@ def run_scan(cycle):
         print(f"  Weather markets found: {len(fetch_polymarkets_weather())}")
     print(f"  Vegas odds cached: {sum(len(v) for v in vegas_cache.values())} games across {len(vegas_cache)} leagues")
 
+    if ENABLE_COPYTRADE:
+        run_copytrade_refresh(cycle)
     cs = run_crypto_scan(implied) if ENABLE_CRYPTO_SIGNALS else 0
     ss = run_sports_scan()       if ENABLE_SPORTS_SIGNALS else 0
     ws = run_weather_scan()      if ENABLE_WEATHER_SIGNALS else 0
@@ -1150,6 +1215,11 @@ if __name__ == "__main__":
     db_init_wallets()
     db_load_alerted()
 
+    if CURATED_WALLETS:
+        for addr in CURATED_WALLETS:
+            db_upsert_wallet(addr, win_rate=1.0, markets_resolved=0, total_pnl=0, curated=True)
+        print(f"  Seeded {len(CURATED_WALLETS)} curated wallet(s).")
+
     send_telegram(
         f"⚡ <b>DUB Trading Bot started</b>\n\n"
         f"Version: {BOT_VERSION}\n"
@@ -1158,6 +1228,7 @@ if __name__ == "__main__":
         f"Crypto: {'✅' if ENABLE_CRYPTO_SIGNALS else '⏸'} ({', '.join(CRYPTO_PAIRS)})\n"
         f"Sports: {'✅' if ENABLE_SPORTS_SIGNALS and ODDS_API_KEYS else ('⏸' if not ENABLE_SPORTS_SIGNALS else '❌')} ({len(SPORTS_LEAGUES)} leagues, {len(ODDS_API_KEYS)} key(s))\n"
         f"Weather: {'✅' if ENABLE_WEATHER_SIGNALS else '⏸'}\n"
+        f"Copytrade: {'✅' if ENABLE_COPYTRADE else '⏸ disabled'}\n"
         f"Logging: {'✅ Postgres' if DATABASE_URL else '❌'}"
     )
 
