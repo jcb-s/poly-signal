@@ -31,6 +31,7 @@ GAMMA_API            = "https://gamma-api.polymarket.com"
 POLYMARKET_DATA_API  = "https://data-api.polymarket.com"
 ODDS_API             = "https://api.the-odds-api.com/v4"
 NOAA_API             = "https://api.weather.gov"
+OPEN_METEO_API       = "https://api.open-meteo.com/v1"
 KRAKEN_API           = "https://api.kraken.com/0/public"
 
 KRAKEN_SYMBOLS = {
@@ -768,6 +769,32 @@ def fetch_noaa_current_temp(lat, lon):
         print(f"  NOAA current temp error ({lat},{lon}): {e}")
         return None
 
+def fetch_openmeteo_forecast(lat, lon):
+    """Fetch Open-Meteo 3-day daily max temp. Returns {date_str: max_temp_f} or {} on failure."""
+    try:
+        r = requests.get(
+            f"{OPEN_METEO_API}/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "temperature_2m_max",
+                "temperature_unit": "fahrenheit",
+                "forecast_days": 3,
+                "timezone": "auto",
+            },
+            timeout=10,
+        )
+        if not r.ok:
+            print(f"  Open-Meteo forecast failed: {r.status_code}")
+            return {}
+        data = r.json()
+        dates = data.get("daily", {}).get("time", [])
+        temps = data.get("daily", {}).get("temperature_2m_max", [])
+        return {d: t for d, t in zip(dates, temps) if t is not None}
+    except Exception as e:
+        print(f"  Open-Meteo fetch error ({lat},{lon}): {e}")
+        return {}
+
 def parse_rain_prob(period):
     prob = period.get("probabilityOfPrecipitation", {})
     if prob and prob.get("value") is not None:
@@ -861,9 +888,10 @@ def run_weather_scan():
 
     signals = 0
     for city in WEATHER_CITIES:
-        forecast = fetch_noaa_forecast(city["lat"], city["lon"])
+        forecast    = fetch_noaa_forecast(city["lat"], city["lon"])
+        om_forecast = fetch_openmeteo_forecast(city["lat"], city["lon"])
         matched = sum(1 for m in poly_weather if city["name"].lower() in m.get("question", "").lower())
-        print(f"  Weather {city['name']}: forecast={'ok' if forecast else 'failed'}, markets matched={matched}")
+        print(f"  Weather {city['name']}: forecast={'ok' if forecast else 'failed'}, om={'ok' if om_forecast else 'failed'}, markets matched={matched}")
         if not forecast:
             continue
 
@@ -889,6 +917,8 @@ def run_weather_scan():
             # Determine market type and derive implied probability
             implied = None
             signal_label = ""
+            om_temp_f = None
+            noaa_value_str = ""
             q_lower = question.lower()
 
             is_temp_market = any(w in q_lower for w in
@@ -918,6 +948,11 @@ def run_weather_scan():
                 if temp_f is not None:
                     implied = implied_prob_for_temp_market(question, temp_f)
                     signal_label = f"🌡️ NOAA temp: {temp_f:.0f}°F → implied"
+                    noaa_value_str = f"{temp_f:.0f}°F"
+                    if om_forecast:
+                        start_time = daytime.get("startTime", "")
+                        date_str = start_time[:10] if start_time else (sorted(om_forecast.keys())[0] if om_forecast else "")
+                        om_temp_f = om_forecast.get(date_str)
 
             if implied is None and is_precip_market:
                 for period in forecast:
@@ -925,6 +960,9 @@ def run_weather_scan():
                     if rain_prob is not None:
                         implied = rain_prob
                         signal_label = f"🌧 NOAA precip: {rain_prob*100:.0f}% → implied"
+                        noaa_value_str = f"{rain_prob*100:.0f}%"
+                        if om_forecast and om_temp_f is None:
+                            om_temp_f = om_forecast.get(sorted(om_forecast.keys())[0])
                         break
 
             if implied is None:
@@ -962,13 +1000,16 @@ def run_weather_scan():
 
             conf_label = {1: "Low", 2: "Medium", 3: "High"}[confidence]
             emoji = "🟢" if direction == "YES" else "🔴"
-            print(f"  ⚡ WEATHER — {question[:50]} | {direction} | +{abs_edge*100:.1f}% | conf={confidence}")
+            om_log  = f"OM={om_temp_f:.0f}°F" if om_temp_f is not None else "OM=n/a"
+            om_line = f"🌡️ Open-Meteo: {om_temp_f:.0f}°F\n" if om_temp_f is not None else ""
+            print(f"  ⚡ WEATHER — {question[:50]} | {direction} | +{abs_edge*100:.1f}% | conf={confidence} | NOAA={noaa_value_str} | {om_log}")
             send_telegram(
                 f"{emoji} <b>WEATHER SIGNAL</b>\n\n"
                 f"📋 <b>Market:</b> {question}\n"
                 f"🎯 <b>Bet:</b> {direction}\n"
                 f"📊 <b>Poly price:</b> {poly_price*100:.1f}¢\n"
                 f"{signal_label}: {implied*100:.0f}¢\n"
+                f"{om_line}"
                 f"⚡ <b>Edge:</b> +{abs_edge*100:.1f}%\n"
                 f"🎯 <b>Confidence:</b> {conf_label} ({confidence}/3)\n"
                 f"{kelly_str(abs_edge, poly_price, direction)}"
