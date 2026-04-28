@@ -1090,6 +1090,17 @@ if __name__ == "__main__":
 
     db_init()
     db_init_wallets()
+
+    # ONE-TIME CLEAR — remove after deploy
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE tracked_wallets CASCADE;")
+        print("✅ Cleared tracked_wallets and wallet_positions.")
+    except Exception as e:
+        print(f"Clear error: {e}")
+    # END ONE-TIME CLEAR
+
     db_load_alerted()
 
     if CURATED_WALLETS:
