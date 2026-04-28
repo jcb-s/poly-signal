@@ -232,6 +232,23 @@ def db_get_tracked_wallets():
         print(f"DB get wallets error: {e}")
         return []
 
+def db_count_wallet_outcomes(address, condition_id):
+    """Return how many distinct outcomes this wallet already has logged for a condition_id."""
+    if not DATABASE_URL:
+        return 0
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(DISTINCT outcome) FROM wallet_positions "
+                    "WHERE address = %s AND condition_id = %s",
+                    (address, condition_id),
+                )
+                return cur.fetchone()[0] or 0
+    except Exception as e:
+        print(f"DB count wallet outcomes error: {e}")
+        return 0
+
 def db_log_wallet_position(address, position):
     """Insert a new wallet position row. Returns True if it was genuinely new."""
     if not DATABASE_URL:
@@ -1090,6 +1107,11 @@ def run_wallet_scan(cycle):
                 end_dt = parse_aware_dt(end_str)
                 if end_dt is not None and end_dt < now:
                     continue
+
+            condition_id = p.get("conditionId", "")
+            if db_count_wallet_outcomes(addr, condition_id) >= 3:
+                print(f"    Skip (hedge detected, addr={addr[:10]}... condition={condition_id[:10]}...)")
+                continue
 
             if not db_log_wallet_position(addr, p):
                 continue  # already alerted
